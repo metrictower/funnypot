@@ -7,6 +7,8 @@ namespace Funnypot\Sensor;
 use Funnypot\Core\Detection;
 use Funnypot\Core\Honeypot;
 use Funnypot\Core\RequestContext;
+use Funnypot\Core\SiteProfile;
+use Funnypot\Core\Verdict;
 use Funnypot\Core\Support\Severity;
 use Funnypot\Mainnet\Client;
 use Funnypot\Mainnet\Config as MainnetConfig;
@@ -53,16 +55,21 @@ final class Funnypot
     /** @var string one of the core severity strings */
     private $minSeverity;
 
+    /** @var SiteProfile the host's real-route oracle — the single most important input here */
+    private $profile;
+
     public function __construct(
         Honeypot $engine,
         Client $mainnet,
         Reporter $reporter,
-        string $minSeverity = self::DEFAULT_MIN_SEVERITY
+        string $minSeverity = self::DEFAULT_MIN_SEVERITY,
+        ?SiteProfile $profile = null
     ) {
         $this->engine = $engine;
         $this->mainnet = $mainnet;
         $this->reporter = $reporter;
         $this->minSeverity = $minSeverity;
+        $this->profile = $profile !== null ? $profile : SiteProfile::empty();
     }
 
     /**
@@ -105,6 +112,39 @@ final class Funnypot
             );
         }
 
+        // The real-route oracle, and it is REQUIRED for the same reason the key is: without it the
+        // package silently does the wrong thing. /login, /admin, /register and /index.php are all in
+        // the nuclei corpus — scanners look for them precisely because real apps have them — so with
+        // no oracle a genuine Chrome visitor to your own login page is reportable. Measured before
+        // this was required: 8 of 10 ordinary routes reported a real browser.
+        //
+        // Pass `'routes' => false` to declare that NOTHING on this host is real. That is the
+        // honeypot posture, and it must be stated rather than defaulted into.
+        if (!array_key_exists('routes', $config)) {
+            throw new InvalidArgumentException(
+                'funnypot: "routes" is required — a callable fn(string $method, string $path): bool '
+                . 'that says whether a path is a REAL route on this site. Without it, your own '
+                . '/login and /admin look exactly like scanner probes and your real visitors get '
+                . 'reported. Pass "routes" => false if nothing on this host is real (a honeypot).'
+            );
+        }
+
+        $stack = array(isset($config['stack']) ? (string) $config['stack'] : 'unknown');
+        if ($config['routes'] === false) {
+            $profile = new SiteProfile($stack, static function ($method, $path) {
+                return false; // honeypot: nothing here is a real route
+            });
+        } elseif (is_callable($config['routes'])) {
+            $routes = $config['routes'];
+            $profile = new SiteProfile($stack, static function ($method, $path) use ($routes) {
+                return (bool) call_user_func($routes, $method, $path);
+            });
+        } else {
+            throw new InvalidArgumentException(
+                'funnypot: "routes" must be a callable fn($method, $path): bool, or false for a honeypot.'
+            );
+        }
+
         $mainnetConfig = MainnetConfig::fromArray($config);
         $transport = new CurlTransport($mainnetConfig->timeoutMs());
 
@@ -122,16 +162,31 @@ final class Funnypot
             Honeypot::default(),
             new Client($mainnetConfig, $transport, null, $reporter),
             $reporter,
-            isset($config['min_severity']) ? (string) $config['min_severity'] : self::DEFAULT_MIN_SEVERITY
+            isset($config['min_severity']) ? (string) $config['min_severity'] : self::DEFAULT_MIN_SEVERITY,
+            $profile
         );
     }
 
     /**
      * Classify a request. Pure, no I/O, safe inline on the request path.
+     *
+     * Uses classify(), NOT detect(). detect() is a shim that projects the Verdict down to its
+     * Detection and throws the classification away — so core would say a request is CLEAN and the
+     * Detection would still report matched=true at critical severity. Measured: a real Chrome
+     * browser on `/`, `/login`, `/index.php` and `/api/v1/users` all came back matched=true,
+     * severity critical. A CLEAN verdict now yields Detection::none(), which is what the engine
+     * actually concluded.
      */
     public function inspect(RequestContext $r): Detection
     {
-        return $this->engine->detect($r);
+        $verdict = $this->engine->classify($r, $this->profile);
+
+        // The engine decided this is not a probe. Do not hand back evidence that says otherwise.
+        if ($verdict->classification === Verdict::CLEAN) {
+            return Detection::none();
+        }
+
+        return $verdict->detection;
     }
 
     /**

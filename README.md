@@ -35,6 +35,10 @@ $funnypot = Funnypot::fromArray([
     'key'           => getenv('MAINNET_KEY'),
     'self_ips'      => ['203.0.113.7'],          // this host's own public addresses
     'intel_db_path' => '/var/lib/funnypot/intel.sqlite',
+
+    // REQUIRED. Does this path resolve to a route your app actually serves?
+    'routes'        => fn ($method, $path) => $router->has($method, $path),
+    // ...or 'routes' => false if nothing on this host is real (a honeypot).
 ]);
 
 // On a 404 / unmatched route. Pure, no I/O — safe inline.
@@ -58,6 +62,14 @@ network I/O. There is no genuinely async HTTP in stock PHP without an event loop
 cooperative coroutines with no I/O of their own, and the fire-and-forget socket tricks either
 fail under TLS or still block — so a queue is the honest seam. If you never call `drain()`,
 nothing is ever sent.
+
+**Declare your routes, or your own users get reported.** This is why `routes` is required rather
+than optional. The nuclei corpus contains `/login`, `/admin`, `/register` and `/index.php` precisely
+*because* real applications have them — that is what scanners go looking for. Without the oracle,
+core has no way to know yours are genuine. Measured before it was required: a real Chrome browser
+was reportable on **8 of 10** ordinary application routes, `/login` and `/index.php` among them at
+`critical`. With the oracle declared, all of them are clean and `/wp-login.php` and `/.env` still
+report.
 
 **A template match is not, by itself, a scanner.** The nuclei corpus carries technology-fingerprint
 templates alongside exploit ones, so ordinary unprompted browser requests match:
@@ -91,7 +103,7 @@ If you also want core's deception responses, `Reporting\MainnetObserver` impleme
 ```php
 use Funnypot\Sensor\Reporting\MainnetObserver;
 
-$observer = new MainnetObserver($funnypot, static fn () => $clientIp);
+$observer = new MainnetObserver($funnypot, static function () use ($clientIp) { return $clientIp; });
 $engine   = \Funnypot\Core\Honeypot::default(null, $observer);
 ```
 
