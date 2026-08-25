@@ -10,7 +10,8 @@
 > - Building on the low-level **decision/policy engine** → [funnypot-policy](https://github.com/metrictower/funnypot-policy)
 
 **Early days.** Published and tagged, but the API is deliberately small and will still move — pin a
-caret range (`^0.3`) rather than tracking a branch.
+caret range (`^0.4`) rather than tracking a branch. **0.4 rewrote the whole surface** —
+`inspect()`/`reportable()`/`min_severity` are gone; see *What the Assessment will not let you do*.
 
 The batteries-included entry point: [`funnypot-core`](https://github.com/metrictower/funnypot-core)
 detection wired to [`funnypot-mainnet-client`](https://github.com/metrictower/funnypot-mainnet-client)
@@ -37,15 +38,20 @@ $funnypot = Funnypot::fromArray([
     'intel_db_path' => '/var/lib/funnypot/intel.sqlite',
 
     // REQUIRED. Does this path resolve to a route your app actually serves?
-    'routes'        => fn ($method, $path) => $router->has($method, $path),
-    // ...or 'routes' => false if nothing on this host is real (a honeypot).
+    'own_routes'    => function ($method, $path) use ($router) {
+        return $router->has($method, $path);
+    },
 ]);
 
-// On a 404 / unmatched route. Pure, no I/O — safe inline.
-$detection = $funnypot->inspect(RequestContext::fromGlobals());
+// Pure, no I/O — safe inline on the request path.
+$check = $funnypot->check(RequestContext::fromGlobals());
 
-if ($detection->matched) {
-    $funnypot->report($clientIp, $detection);   // enqueues only, never blocks
+if ($check->shouldReport()) {
+    $funnypot->report($clientIp, $check);   // enqueues only, never blocks
+}
+if ($check->shouldBlock()) {
+    http_response_code(403);
+    exit;
 }
 ```
 
@@ -55,45 +61,95 @@ Then, **out of band** — cron, scheduler, worker, never a web request:
 $funnypot->drain();   // opens sockets; this is where reports actually get sent
 ```
 
-## Three things worth knowing
+That is the whole integration. Two questions, two answers. There is no severity floor to tune and
+no anomaly threshold to pick, because neither of those works — see below.
 
-**Reporting is enqueue-then-drain, and the drain is yours to schedule.** `report()` does no
-network I/O. There is no genuinely async HTTP in stock PHP without an event loop — fibers are
-cooperative coroutines with no I/O of their own, and the fire-and-forget socket tricks either
-fail under TLS or still block — so a queue is the honest seam. If you never call `drain()`,
-nothing is ever sent.
+## Four things worth knowing
 
-**Declare your routes, or your own users get reported.** This is why `routes` is required rather
-than optional. The nuclei corpus contains `/login`, `/admin`, `/register` and `/index.php` precisely
-*because* real applications have them — that is what scanners go looking for. Without the oracle,
-core has no way to know yours are genuine. Measured before it was required: a real Chrome browser
-was reportable on **8 of 10** ordinary application routes, `/login` and `/index.php` among them at
-`critical`. With the oracle declared, all of them are clean and `/wp-login.php` and `/.env` still
-report.
+**Declare your routes, or you report your own users.** `own_routes` is required for the same
+reason `key` is: without it the package silently does the wrong thing. The nuclei corpus contains
+`/login`, `/admin`, `/register` and `/index.php` precisely *because* real applications have them —
+that is what scanners go looking for — so core cannot know yours are genuine unless you say so.
+Measured before it was required: a real Chrome browser was reportable on **8 of 10** ordinary
+application routes, `/login` and `/index.php` among them at `critical`.
 
-**A template match is not, by itself, a scanner.** The nuclei corpus carries technology-fingerprint
-templates alongside exploit ones, so ordinary unprompted browser requests match:
+If you mount `check()` inside your 404 / NotFound handler, your framework has already ruled that
+nothing reaching it is a real route. Say so explicitly:
 
-| path | severity |
-|---|---|
-| `/robots.txt` | medium |
-| `/manifest.json` | medium |
-| `/favicon.ico` | info |
-| `/sitemap.xml` | info |
-| `/browserconfig.xml` | info |
+```php
+'own_routes' => Funnypot::ONLY_ON_404,
+```
 
-`reportable()` applies a **severity floor**, defaulting to `high`. That is a stopgap, not a fix:
-severity does not cleanly separate benign from hostile in either direction — `/.git/config` is
-`medium` and `/actuator/env` is `low`, and both are real probes. What actually separates them is
-request *shape*: the same `/robots.txt` scores anomaly 0 from a real browser and 39 from a
-scanner. If you need that, drive
-[`funnypot-policy`](https://github.com/metrictower/funnypot-policy) rather than this facade's
-`reportable()`.
+**A corpus match is not a scanner, and neither severity nor anomaly separates them.** The corpus
+carries technology-fingerprint templates next to exploit ones, so ordinary unprompted browser
+requests match: `/robots.txt` and `/manifest.json` are `medium`, `/favicon.ico` and `/sitemap.xml`
+are `info`.
+
+Two axes were measured and both were rejected:
+
+- **Severity is anti-correlated with benignness** at the top of the traffic distribution. `/` is
+  `critical` (1,590 templates), so are `/index.php` and `/login`, because the corpus piles its most
+  and most-severe templates onto the paths everyone requests. Meanwhile `/.git/config` is `medium`
+  and `/actuator/env` is `low`, and both are real probes.
+- **Anomaly is path-blind.** 15 paths × 8 client shapes produced an identical anomaly row for every
+  path — the same client scores the same on `/robots.txt` as on `/.env`. And the bands interleave
+  once you include legitimate non-browser clients: UptimeRobot 24 > Googlebot 19 > **curl 14**.
+  There is no cut point to choose.
+
+So the judgement turns on the **path property** plus named signal flags. `Assessment::AMBIENT`
+covers the ~17 exact paths a site is asked for whether or not it has them, and it costs 10 of the
+corpus's 5,196 route keys. Tune it with `ambient_extra` / `ambient_drop`; replace the judgement
+wholesale with a `Judge`.
+
+**One benign report is worse than no report.** The mainnet dedup key is the IP alone, marked at
+enqueue, over a 24-hour window. A benign `/robots.txt` report consumes that IP's slot, and the same
+IP's real probe two hours later is silently dropped as a duplicate. False positives do not merely
+add noise — they spend the sensor's budget on visitors and drop the attacks. That is why the
+defaults here are conservative, and why one false negative is stated rather than papered over: a
+scanner that spoofs a complete Chrome header set and touches only ambient paths is not reported.
+Forged Chrome measures anomaly 0 even on `/.env`, so no anomaly design catches it either.
 
 **It refuses to start half-configured.** The underlying SDK is fail-safe by design and skips
 silently when the key, `self_ips`, or the queue path is missing — which for an embedder reads as
 "installed and working" until someone notices no reports ever arrived. `fromArray()` turns each of
 those into a constructor error instead.
+
+## The two profiles
+
+```php
+'profile' => Funnypot::PROFILE_APP,        // default: a real site with real visitors
+'profile' => Funnypot::PROFILE_HONEYPOT,   // nothing on this host is real
+```
+
+The profile moves `shouldReport()` / `shouldBlock()` and **nothing else**. Evidence on the
+`Assessment` — `kind()`, `severity()`, `anomaly()`, `signals()`, `templateIds()`, `tags()` — is
+always populated either way, so a honeypot logs the same row a real app would.
+
+| `kind()` | report, APP | report, HONEYPOT | block, APP |
+|---|---|---|---|
+| `clean` | no | no | no |
+| `ambient` | only with a scanner UA | yes | no |
+| `scanner-probe` | yes | yes | yes |
+| `attack-class` | yes | yes | yes |
+
+`shouldBlock()` is always false under `PROFILE_HONEYPOT`: a honeypot that blocks has told the
+attacker it detected them. Ambient paths are never blocked even from a scanner — refusing a
+`/robots.txt` fetch gains nothing and costs you a crawler the day the UA match is wrong.
+
+## What the Assessment will not let you do
+
+The one mistake this shape exists to prevent is reaching past the verbs for something that reads
+like state:
+
+```php
+if ($check->matched) { … }      // LogicException, with an explanation
+$funnypot->report($ip, $detection);   // TypeError — report() takes an Assessment
+```
+
+Both fire in coercive mode too. `inspect()`, `reportable()` and `min_severity` are gone rather than
+deprecated — `reportable()` was measured returning true for a real browser on `/`, `/login` and
+`/index.php`, so leaving it reachable was the larger risk. Upgrading is a fatal at composer-update
+time, never a silent over-report.
 
 ## Serving fakes too
 
@@ -108,7 +164,10 @@ $engine   = \Funnypot\Core\Honeypot::default(null, $observer);
 ```
 
 Core calls an Observer only on the `respond()` path, so detect-only integrations should stay with
-`inspect()` / `report()` at their own call site.
+`check()` / `report()` at their own call site. The observer re-runs `check()` rather than reporting
+on the `Detection` core hands it: a Detection carries no classification, so reporting on one means
+reporting on a bare corpus match. The re-check costs a few microseconds and keeps both paths on one
+dialect.
 
 ## Namespace
 

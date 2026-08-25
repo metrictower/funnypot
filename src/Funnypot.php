@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace Funnypot\Sensor;
 
-use Funnypot\Core\Detection;
+use Funnypot\Core\BotSignalSet;
 use Funnypot\Core\Honeypot;
 use Funnypot\Core\RequestContext;
 use Funnypot\Core\SiteProfile;
 use Funnypot\Core\Verdict;
-use Funnypot\Core\Support\Severity;
 use Funnypot\Mainnet\Client;
 use Funnypot\Mainnet\Config as MainnetConfig;
 use Funnypot\Mainnet\Report\PdoSqliteReportQueue;
@@ -20,28 +19,42 @@ use InvalidArgumentException;
 /**
  * Batteries-included facade: funnypot-core detection wired to funnypot-mainnet-client reporting.
  *
- * The two packages already compose by hand. What this adds is the wiring an embedder would
- * otherwise have to rediscover, plus the invariants that are easy to get wrong:
+ * The whole integration is two questions:
  *
- *  - detect() is pure and cheap, so it is safe inline. report() only ever ENQUEUES; delivery
- *    happens in drain(), which the host must call out of band (cron, scheduler, worker). There
- *    is no genuinely async HTTP in stock PHP without an event loop, so the queue is the seam.
- *  - a bare template match is NOT a report signal. The nuclei corpus carries fingerprint
- *    templates next to exploit ones, so ordinary browser chatter (/favicon.ico, /robots.txt,
- *    /sitemap.xml, /manifest.json) matches. reportable() applies a severity floor — see the
- *    README for why a floor is a stopgap rather than the fix.
+ *     $check = $funnypot->check($request);
+ *     if ($check->shouldReport()) { $funnypot->report($clientIp, $check); }
+ *     if ($check->shouldBlock())  { http_response_code(403); exit; }
+ *
+ * check() is pure and cheap, so it is safe inline. report() only ever ENQUEUES; delivery happens
+ * in drain(), which the host calls out of band (cron, scheduler, worker). There is no genuinely
+ * async HTTP in stock PHP without an event loop, so the queue is the seam.
+ *
+ * There is no severity floor and no anomaly threshold, because neither works. Severity is
+ * ANTI-correlated with benignness at the top of the traffic distribution — the corpus piles its
+ * most and most-severe templates onto `/`, `/index.php` and `/login`, since those are what
+ * scanners look for — and anomaly is path-blind, scoring a client the same on /robots.txt as on
+ * /.env, with UptimeRobot (24) and Googlebot (19) both above curl (14). The judgement turns on
+ * the path property and named signal flags instead. See README.
  *
  * It also refuses to start half-configured. The SDK is deliberately fail-safe and will skip
  * silently when a key, self_ips, or a queue path is missing; for an embedder that reads as
- * "installed and working" right up until nobody notices no reports ever arrived. This facade
- * turns each of those into a constructor error instead.
+ * "installed and working" right up until nobody notices no reports ever arrived.
  *
  * 7.3-clean: classic constructor, docblocked untyped properties, no promotion/match/enums.
  */
 final class Funnypot
 {
-    /** Conservative default: fewer reports, no benign browser chatter. */
-    public const DEFAULT_MIN_SEVERITY = 'high';
+    /** A real site with real visitors. The default, and the safe one. */
+    public const PROFILE_APP = 'app';
+
+    /** No legitimate traffic reaches this host, so everything is worth reporting. */
+    public const PROFILE_HONEYPOT = 'honeypot';
+
+    /**
+     * own_routes value for the documented mount point: check() runs inside the 404 / NotFound
+     * handler, so the framework has already ruled that nothing here is a real route.
+     */
+    public const ONLY_ON_404 = 'only-on-404';
 
     /** @var Honeypot */
     private $engine;
@@ -52,31 +65,44 @@ final class Funnypot
     /** @var Reporter owned directly so drain() is reachable — Client exposes no drain of its own */
     private $reporter;
 
-    /** @var string one of the core severity strings */
-    private $minSeverity;
-
-    /** @var SiteProfile the host's real-route oracle — the single most important input here */
+    /** @var SiteProfile the host's real-route oracle */
     private $profile;
 
+    /** @var string one of the PROFILE_* constants */
+    private $posture;
+
+    /** @var array<string,true> */
+    private $ambient;
+
+    /** @var Judge|null */
+    private $judge;
+
+    /**
+     * @param array<string,true> $ambient
+     */
     public function __construct(
         Honeypot $engine,
         Client $mainnet,
         Reporter $reporter,
-        string $minSeverity = self::DEFAULT_MIN_SEVERITY,
-        ?SiteProfile $profile = null
+        SiteProfile $profile,
+        string $posture = self::PROFILE_APP,
+        array $ambient = array(),
+        ?Judge $judge = null
     ) {
         $this->engine = $engine;
         $this->mainnet = $mainnet;
         $this->reporter = $reporter;
-        $this->minSeverity = $minSeverity;
-        $this->profile = $profile !== null ? $profile : SiteProfile::empty();
+        $this->profile = $profile;
+        $this->posture = $posture;
+        $this->ambient = $ambient === array() ? AmbientPaths::lookup() : $ambient;
+        $this->judge = $judge;
     }
 
     /**
      * Build from a plain config array.
      *
-     * Required keys: 'key', 'self_ips', 'intel_db_path'. Each is a silent-skip path in the SDK
-     * if absent, so each is validated loudly here instead.
+     * Required: 'key', 'self_ips', 'intel_db_path', and — under PROFILE_APP — 'own_routes'.
+     * Each is a silent-skip path somewhere downstream, so each is validated loudly here.
      *
      * @param array<string,mixed> $config
      */
@@ -112,38 +138,22 @@ final class Funnypot
             );
         }
 
-        // The real-route oracle, and it is REQUIRED for the same reason the key is: without it the
-        // package silently does the wrong thing. /login, /admin, /register and /index.php are all in
-        // the nuclei corpus — scanners look for them precisely because real apps have them — so with
-        // no oracle a genuine Chrome visitor to your own login page is reportable. Measured before
-        // this was required: 8 of 10 ordinary routes reported a real browser.
-        //
-        // Pass `'routes' => false` to declare that NOTHING on this host is real. That is the
-        // honeypot posture, and it must be stated rather than defaulted into.
-        if (!array_key_exists('routes', $config)) {
+        if (isset($config['min_severity'])) {
             throw new InvalidArgumentException(
-                'funnypot: "routes" is required — a callable fn(string $method, string $path): bool '
-                . 'that says whether a path is a REAL route on this site. Without it, your own '
-                . '/login and /admin look exactly like scanner probes and your real visitors get '
-                . 'reported. Pass "routes" => false if nothing on this host is real (a honeypot).'
+                'funnypot: "min_severity" no longer exists. There is no severity axis to set — at the '
+                . 'old default of "high" a real browser was reportable on your own /, /login and '
+                . '/index.php, all of which the corpus rates critical. Use "profile" instead.'
             );
         }
 
-        $stack = array(isset($config['stack']) ? (string) $config['stack'] : 'unknown');
-        if ($config['routes'] === false) {
-            $profile = new SiteProfile($stack, static function ($method, $path) {
-                return false; // honeypot: nothing here is a real route
-            });
-        } elseif (is_callable($config['routes'])) {
-            $routes = $config['routes'];
-            $profile = new SiteProfile($stack, static function ($method, $path) use ($routes) {
-                return (bool) call_user_func($routes, $method, $path);
-            });
-        } else {
+        $posture = isset($config['profile']) ? (string) $config['profile'] : self::PROFILE_APP;
+        if ($posture !== self::PROFILE_APP && $posture !== self::PROFILE_HONEYPOT) {
             throw new InvalidArgumentException(
-                'funnypot: "routes" must be a callable fn($method, $path): bool, or false for a honeypot.'
+                'funnypot: "profile" must be Funnypot::PROFILE_APP or Funnypot::PROFILE_HONEYPOT.'
             );
         }
+
+        $profile = self::buildSiteProfile($config, $posture);
 
         $mainnetConfig = MainnetConfig::fromArray($config);
         $transport = new CurlTransport($mainnetConfig->timeoutMs());
@@ -158,51 +168,160 @@ final class Funnypot
             $mainnetConfig->dedupHours()
         );
 
+        $judge = isset($config['judge']) ? $config['judge'] : null;
+        if ($judge !== null && !$judge instanceof Judge) {
+            throw new InvalidArgumentException('funnypot: "judge" must implement Funnypot\Sensor\Judge.');
+        }
+
         return new self(
             Honeypot::default(),
             new Client($mainnetConfig, $transport, null, $reporter),
             $reporter,
-            isset($config['min_severity']) ? (string) $config['min_severity'] : self::DEFAULT_MIN_SEVERITY,
-            $profile
+            $profile,
+            $posture,
+            AmbientPaths::lookup(
+                isset($config['ambient_extra']) && is_array($config['ambient_extra']) ? $config['ambient_extra'] : array(),
+                isset($config['ambient_drop']) && is_array($config['ambient_drop']) ? $config['ambient_drop'] : array()
+            ),
+            $judge
         );
     }
 
     /**
-     * Classify a request. Pure, no I/O, safe inline on the request path.
+     * The real-route oracle, required under PROFILE_APP for the same reason the key is: without
+     * it the package silently does the wrong thing.
      *
-     * Uses classify(), NOT detect(). detect() is a shim that projects the Verdict down to its
-     * Detection and throws the classification away — so core would say a request is CLEAN and the
-     * Detection would still report matched=true at critical severity. Measured: a real Chrome
-     * browser on `/`, `/login`, `/index.php` and `/api/v1/users` all came back matched=true,
-     * severity critical. A CLEAN verdict now yields Detection::none(), which is what the engine
-     * actually concluded.
+     * /login, /admin, /register and /index.php are all in the nuclei corpus — scanners look for
+     * them precisely BECAUSE real apps have them — so core cannot know yours are genuine unless
+     * you say so. Measured before this was required: a real Chrome browser was reportable on 8
+     * of 10 ordinary application routes.
+     *
+     * Under PROFILE_HONEYPOT the question does not arise: nothing on the host is real.
+     *
+     * @param array<string,mixed> $config
      */
-    public function inspect(RequestContext $r): Detection
+    private static function buildSiteProfile(array $config, string $posture): SiteProfile
     {
-        $verdict = $this->engine->classify($r, $this->profile);
+        $stack = array(isset($config['stack']) ? (string) $config['stack'] : 'unknown');
+        $noRoutes = static function ($method, $path) {
+            return false;
+        };
 
-        // The engine decided this is not a probe. Do not hand back evidence that says otherwise.
-        if ($verdict->classification === Verdict::CLEAN) {
-            return Detection::none();
+        if ($posture === self::PROFILE_HONEYPOT) {
+            return new SiteProfile($stack, $noRoutes);
         }
 
-        return $verdict->detection;
+        if (!array_key_exists('own_routes', $config)) {
+            throw new InvalidArgumentException(
+                'funnypot: "own_routes" is required — a callable fn(string $method, string $path): bool '
+                . 'saying whether a path is a REAL route on this site. Without it your own /login and '
+                . '/admin look exactly like scanner probes and your real visitors get reported. '
+                . 'Pass Funnypot::ONLY_ON_404 if you only call check() from your 404 handler.'
+            );
+        }
+
+        if ($config['own_routes'] === self::ONLY_ON_404) {
+            return new SiteProfile($stack, $noRoutes);
+        }
+
+        if (!is_callable($config['own_routes'])) {
+            throw new InvalidArgumentException(
+                'funnypot: "own_routes" must be a callable fn($method, $path): bool, or '
+                . 'Funnypot::ONLY_ON_404.'
+            );
+        }
+
+        $routes = $config['own_routes'];
+
+        return new SiteProfile($stack, static function ($method, $path) use ($routes) {
+            return (bool) call_user_func($routes, $method, $path);
+        });
     }
 
     /**
-     * Whether a detection clears the reporting floor.
+     * Classify a request and decide what to do about it. Pure, no I/O, safe inline.
      *
-     * Severity-only, so coarse. An embedder wanting the composite decision (severity combined
-     * with request-shape anomaly, which is what actually separates a scanner from a browser on
-     * a boring path) should drive funnypot-policy instead of this method.
+     * Uses classify(), NOT detect(). detect() projects the Verdict down to its Detection and
+     * throws the classification away, so core would conclude CLEAN while the Detection still
+     * read matched=true at critical severity.
      */
-    public function reportable(Detection $detection): bool
+    public function check(RequestContext $r): Assessment
     {
-        if (!$detection->matched || $detection->highestSeverity === '') {
-            return false;
+        $verdict = $this->engine->classify($r, $this->profile);
+        $kind = $this->kindOf($verdict, $r);
+
+        if ($this->judge !== null) {
+            $ruling = $this->judge->judge($verdict, $r, $this->posture);
+
+            return new Assessment(
+                $verdict,
+                $kind,
+                (bool) $ruling['report'],
+                (bool) $ruling['block'],
+                isset($ruling['reason']) ? (string) $ruling['reason'] : 'judge'
+            );
         }
 
-        return Severity::rank($detection->highestSeverity) >= Severity::rank($this->minSeverity);
+        return $this->rule($verdict, $kind);
+    }
+
+    /**
+     * Ambient is a property of the PATH, checked only once core has already said "corpus hit".
+     * A clean request stays clean, and a request core rates attack-class is never softened by
+     * the path it came in on.
+     */
+    private function kindOf(Verdict $verdict, RequestContext $r): string
+    {
+        if ($verdict->classification !== Verdict::SCANNER_PROBE) {
+            return $verdict->classification;
+        }
+
+        $path = $r->path;
+        $query = strpos($path, '?');
+        if ($query !== false) {
+            $path = substr($path, 0, $query);
+        }
+
+        return isset($this->ambient[$path]) ? Assessment::AMBIENT : $verdict->classification;
+    }
+
+    /**
+     * The default judgement. A named flag, never a number.
+     *
+     * The anomaly bands interleave — UptimeRobot 24, Googlebot 19, curl 14 — so no threshold
+     * separates a scanner from a monitor. SCANNER_USER_AGENT fires for the scanner UA class and
+     * for none of those legitimate clients.
+     *
+     * shouldBlock() covers scanner-probe as well as attack-class. Core reaches attack-class only
+     * with attack emulation on, which is a response-SERVING feature: measured, it changes no
+     * classification at all and costs ~20x on the miss path, so a detection sensor leaves it off.
+     * Blocking is safe here because the two ways a real visitor could reach this branch are both
+     * already closed — a real route is fenced by the oracle, and browser chatter is ambient.
+     */
+    private function rule(Verdict $verdict, string $kind): Assessment
+    {
+        $honeypot = $this->posture === self::PROFILE_HONEYPOT;
+
+        if ($kind === Verdict::CLEAN || $kind === Verdict::SUSPICIOUS) {
+            return new Assessment($verdict, $kind, false, false, 'clean');
+        }
+
+        // Ambient paths are never blocked, even from a scanner. Refusing a /robots.txt fetch
+        // gains nothing and costs you a crawler the day the UA match is wrong.
+        if ($kind === Assessment::AMBIENT) {
+            if ($honeypot) {
+                return new Assessment($verdict, $kind, true, false, 'honeypot-profile');
+            }
+
+            $scannerUa = $verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT);
+
+            return new Assessment($verdict, $kind, $scannerUa, false, $scannerUa ? 'scanner-ua' : 'ambient');
+        }
+
+        // A honeypot that blocks has told the attacker it detected them.
+        $reason = $honeypot ? 'honeypot-profile' : ($kind === Verdict::ATTACK_CLASS ? 'attack' : 'probe');
+
+        return new Assessment($verdict, $kind, true, !$honeypot, $reason);
     }
 
     /**
@@ -212,15 +331,16 @@ final class Funnypot
      *
      * @return array{queued:bool,reason:string}
      */
-    public function report(string $ip, Detection $detection, string $comment = ''): array
+    public function report(string $ip, Assessment $assessment, string $comment = ''): array
     {
-        if (!$this->reportable($detection)) {
-            return array('queued' => false, 'reason' => 'below severity floor');
+        if (!$assessment->shouldReport()) {
+            return array('queued' => false, 'reason' => $assessment->reason());
         }
 
         if ($comment === '') {
-            $ids = $detection->templateIds();
-            $comment = 'funnypot: ' . $detection->highestSeverity . ' ' . implode(',', array_slice($ids, 0, 5));
+            $ids = $assessment->templateIds();
+            $comment = 'funnypot: ' . $assessment->kind()
+                . ($ids === array() ? '' : ' ' . implode(',', array_slice($ids, 0, 5)));
         }
 
         return $this->mainnet->report($ip, $comment);
