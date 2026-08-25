@@ -23,12 +23,12 @@
     "prefer-stable": true,
     "autoload": {
         "psr-4": {
-            "Funnypot\\Bundle\\": "src/"
+            "Funnypot\\Sensor\\": "src/"
         }
     },
     "autoload-dev": {
         "psr-4": {
-            "Funnypot\\Bundle\\Tests\\": "tests/"
+            "Funnypot\\Sensor\\Tests\\": "tests/"
         }
     },
     "config": {

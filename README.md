@@ -9,7 +9,8 @@
 > - Querying / reporting to the **IP-reputation service** from code (the SDK) → [funnypot-mainnet-client](https://github.com/metrictower/funnypot-mainnet-client)
 > - Building on the low-level **decision/policy engine** → [funnypot-policy](https://github.com/metrictower/funnypot-policy)
 
-**Skeleton — not yet released.** The API below works but is deliberately small; expect it to move.
+**Early days.** Published and tagged, but the API is deliberately small and will still move — pin a
+caret range (`^0.3`) rather than tracking a branch.
 
 The batteries-included entry point: [`funnypot-core`](https://github.com/metrictower/funnypot-core)
 detection wired to [`funnypot-mainnet-client`](https://github.com/metrictower/funnypot-mainnet-client)
@@ -26,7 +27,7 @@ PHP 7.3+. Needs `ext-pdo_sqlite` for the bundled report queue and `ext-curl` for
 ## Use
 
 ```php
-use Funnypot\Bundle\Funnypot;
+use Funnypot\Sensor\Funnypot;
 use Funnypot\Core\RequestContext;
 
 $funnypot = Funnypot::fromArray([
@@ -88,7 +89,7 @@ If you also want core's deception responses, `Reporting\MainnetObserver` impleme
 `Observer` seam so detections on the `respond()` path get reported:
 
 ```php
-use Funnypot\Bundle\Reporting\MainnetObserver;
+use Funnypot\Sensor\Reporting\MainnetObserver;
 
 $observer = new MainnetObserver($funnypot, static fn () => $clientIp);
 $engine   = \Funnypot\Core\Honeypot::default(null, $observer);
@@ -99,9 +100,15 @@ Core calls an Observer only on the `respond()` path, so detect-only integrations
 
 ## Namespace
 
-`Funnypot\Bundle\`. No package in the family declares the bare `Funnypot\` root — each owns a
-distinct sub-namespace, so PSR-4 resolves deterministically (a longer prefix always wins) instead of
-by autoload registration order.
+`Funnypot\Sensor\` — because that is what this package makes your app: a sensor on the funnypot
+network. It watches and it reports. The vocabulary is already load-bearing elsewhere in the family
+(the SDK mints a per-sensor UUID, mainnet issues sensor keys), so this package finally matches it.
+
+Every package owns a distinct sub-namespace and **none declares the bare `Funnypot\` root** —
+Composer merges identical PSR-4 prefixes into one prefix over several directories and then picks by
+autoload registration order. Distinct sub-namespaces make resolution deterministic, because a longer
+prefix always wins. `Funnypot\Bundle\` is deliberately left free: to a PHP developer "bundle" means
+Symfony, and that is where a future `funnypot-symfony` belongs.
 
 ## Test
 

@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace Funnypot\Bundle\Reporting;
+namespace Funnypot\Sensor\Reporting;
 
-use Funnypot\Bundle\Funnypot;
+use Funnypot\Sensor\Funnypot;
 use Funnypot\Core\Detection;
 use Funnypot\Core\Observer;
 use Funnypot\Core\RequestContext;

@@ -73,7 +73,7 @@ jobs:
           php -r '
             require "vendor/autoload.php";
             $db = sys_get_temp_dir() . "/fp-ci-" . getmypid() . ".sqlite";
-            $fp = \Funnypot\Bundle\Funnypot::fromArray([
+            $fp = \Funnypot\Sensor\Funnypot::fromArray([
               "base_url" => "https://mainnet.invalid",
               "key" => "ci-key",
               "self_ips" => ["203.0.113.7"],

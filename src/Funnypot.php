@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Funnypot\Bundle;
+namespace Funnypot\Sensor;
 
 use Funnypot\Core\Detection;
 use Funnypot\Core\Honeypot;

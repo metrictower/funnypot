@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace Funnypot\Bundle\Tests;
+namespace Funnypot\Sensor\Tests;
 
-use Funnypot\Bundle\Funnypot;
+use Funnypot\Sensor\Funnypot;
 use Funnypot\Core\Detection;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
