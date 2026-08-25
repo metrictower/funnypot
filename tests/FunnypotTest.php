@@ -344,4 +344,37 @@ final class FunnypotTest extends TestCase
         self::assertSame(10, $row['score']);
     }
 
+
+    /**
+     * score() must not depend on whether a Judge is configured. It previously keyed on reason(),
+     * which a Judge overwrites with its own closed label set — funnypot-policy's does not contain
+     * 'scanner-ua', so this case silently scored 1 instead of 10 under a Judge.
+     */
+    public function test_score_is_identical_with_and_without_a_judge(): void
+    {
+        $scannerUa = array('Host' => 'app.example.com', 'User-Agent' => 'Mozilla/5.0 zgrab/0.x');
+
+        $plain = Funnypot::fromArray($this->config());
+        $judged = Funnypot::fromArray($this->config(array(
+            'judge' => new class implements \Funnypot\Sensor\Judge {
+                public function judge(Verdict $verdict, RequestContext $request, string $profile): array
+                {
+                    // A policy-shaped reason: never 'scanner-ua'.
+                    return array('report' => true, 'block' => false, 'reason' => 'malicious-ua');
+                }
+            },
+        )));
+
+        foreach (array('/robots.txt', '/favicon.ico', '/.env', '/') as $path) {
+            self::assertSame(
+                $plain->check($this->request($path, $scannerUa))->score(),
+                $judged->check($this->request($path, $scannerUa))->score(),
+                $path . ' must score the same with or without a judge'
+            );
+        }
+
+        // and the scanner-UA case specifically is the graded one, not the soft one
+        self::assertSame(10, $judged->check($this->request('/robots.txt', $scannerUa))->score());
+    }
+
 }

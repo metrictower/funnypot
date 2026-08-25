@@ -116,8 +116,13 @@ final class Assessment
         }
         if ($this->kind === self::AMBIENT) {
             // A path every site is asked for. Soft on its own; a named scanner UA on the same
-            // request is what makes it worth acting on, and reason() records which case this is.
-            return $this->reason === 'scanner-ua' ? 10 : 1;
+            // request is what makes it worth acting on.
+            //
+            // Reads the signal flag, NOT reason(): a Judge overwrites reason with its own closed
+            // label set, and funnypot-policy's does not contain 'scanner-ua' — so keying on the
+            // string silently scored this 1 instead of 10 whenever a Judge was configured, which
+            // is exactly the judge-dependence the docblock above promises there is none of.
+            return $this->verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT) ? 10 : 1;
         }
 
         return 0;
