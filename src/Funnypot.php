@@ -4,15 +4,15 @@ declare(strict_types=1);
 
 namespace Funnypot\Bundle;
 
-use Funnypot\Detection;
-use Funnypot\Honeypot;
+use Funnypot\Core\Detection;
+use Funnypot\Core\Honeypot;
+use Funnypot\Core\RequestContext;
+use Funnypot\Core\Support\Severity;
 use Funnypot\Mainnet\Client;
 use Funnypot\Mainnet\Config as MainnetConfig;
 use Funnypot\Mainnet\Report\PdoSqliteReportQueue;
 use Funnypot\Mainnet\Report\Reporter;
 use Funnypot\Mainnet\Transport\CurlTransport;
-use Funnypot\RequestContext;
-use Funnypot\Support\Severity;
 use InvalidArgumentException;
 
 /**

@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Funnypot\Bundle\Reporting;
 
 use Funnypot\Bundle\Funnypot;
-use Funnypot\Detection;
-use Funnypot\Observer;
-use Funnypot\RequestContext;
-use Funnypot\SynthesizedResponse;
+use Funnypot\Core\Detection;
+use Funnypot\Core\Observer;
+use Funnypot\Core\RequestContext;
+use Funnypot\Core\SynthesizedResponse;
 
 /**
  * Core's app-policy seam, wired to mainnet reporting.

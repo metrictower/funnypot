@@ -27,7 +27,7 @@ PHP 7.3+. Needs `ext-pdo_sqlite` for the bundled report queue and `ext-curl` for
 
 ```php
 use Funnypot\Bundle\Funnypot;
-use Funnypot\RequestContext;
+use Funnypot\Core\RequestContext;
 
 $funnypot = Funnypot::fromArray([
     'base_url'      => 'https://mainnet.example',
@@ -91,7 +91,7 @@ If you also want core's deception responses, `Reporting\MainnetObserver` impleme
 use Funnypot\Bundle\Reporting\MainnetObserver;
 
 $observer = new MainnetObserver($funnypot, static fn () => $clientIp);
-$engine   = \Funnypot\Honeypot::default(null, $observer);
+$engine   = \Funnypot\Core\Honeypot::default(null, $observer);
 ```
 
 Core calls an Observer only on the `respond()` path, so detect-only integrations should stay with
@@ -99,8 +99,9 @@ Core calls an Observer only on the `respond()` path, so detect-only integrations
 
 ## Namespace
 
-`Funnypot\Bundle\` — deliberately not the bare `Funnypot\` root, which `funnypot-core` already
-claims.
+`Funnypot\Bundle\`. No package in the family declares the bare `Funnypot\` root — each owns a
+distinct sub-namespace, so PSR-4 resolves deterministically (a longer prefix always wins) instead of
+by autoload registration order.
 
 ## Test
 

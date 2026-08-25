@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Funnypot\Bundle\Tests;
 
 use Funnypot\Bundle\Funnypot;
-use Funnypot\Detection;
+use Funnypot\Core\Detection;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
