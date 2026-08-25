@@ -167,6 +167,28 @@ reports your own users — measured at 8 of 10 ordinary routes.
 the recommended way to start: run funnypot beside whatever you have, compare the two, and only then
 give it authority.
 
+### Acting on a scripting user agent — opt-in, and off by default
+
+```php
+'act_on_scripting_uas' => true,     // default false
+```
+
+**The path is the signal; the user agent is weak corroboration.** An exploit against `/wp-admin/`
+or a fetch of `/.env` is malicious whether it arrives from Chrome, curl or Googlebot — and a plain
+`curl` request to an ordinary page is not an attack.
+
+So by default a scripting UA (`curl`, `python-requests`, `wget`, `Go-http-client`) changes nothing:
+the same path returns the same verdict whoever asks. Only **named scanner tools** (`nikto`,
+`sqlmap`, `zgrab`, `nuclei`) act on their own.
+
+Turn this on and a scripting UA additionally makes an **ambient** path reportable. It never causes
+blocking, at any setting.
+
+**Think hard before enabling it on an API host.** `curl` and `python-requests` against `/api/` are
+the *expected* clients — they are the integrations your app exists to serve. The signal is really
+path-dependent, not client-dependent: the same UA is unremarkable on an API and odd on a login
+form, and treating it as a property of the client alone is what produces the false positive.
+
 ### What is NOT available yet
 
 Everything above is **stateless** — each request is judged on its own. What funnypot cannot yet do

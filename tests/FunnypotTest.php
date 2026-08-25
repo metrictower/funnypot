@@ -377,4 +377,93 @@ final class FunnypotTest extends TestCase
         self::assertSame(10, $judged->check($this->request('/robots.txt', $scannerUa))->score());
     }
 
+
+    // ── FP-0105: the path is the signal; a scripting UA is weak corroboration ──
+
+    /** @return array<string,string> */
+    private function scriptingUa(string $ua = 'curl/8.4.0'): array
+    {
+        return array('Host' => 'app.example.com', 'User-Agent' => $ua);
+    }
+
+    /**
+     * curl and python-requests against /api/ are the EXPECTED clients of an API host. Acting on
+     * them by default would break the integrations the app exists to serve.
+     */
+    public function test_a_scripting_ua_alone_never_blocks_by_default(): void
+    {
+        // Isolate the UA as the only variable: same paths, browser vs script. If the two differ,
+        // the user agent moved the verdict — which is what must not happen by default.
+        $funnypot = Funnypot::fromArray($this->config());
+
+        foreach (array('curl/8.4.0', 'python-requests/2.31', 'Go-http-client/2.0', 'okhttp/4.12') as $ua) {
+            foreach (array('/', '/api/v1/users', '/some/missing/page', '/robots.txt') as $path) {
+                $script = $funnypot->check($this->request($path, $this->scriptingUa($ua)));
+                $browser = $funnypot->check($this->request($path));
+
+                self::assertSame(
+                    $browser->shouldBlock(),
+                    $script->shouldBlock(),
+                    $ua . ' on ' . $path . ' must not change the block decision'
+                );
+                self::assertSame(
+                    $browser->shouldReport(),
+                    $script->shouldReport(),
+                    $ua . ' on ' . $path . ' must not change the report decision'
+                );
+            }
+        }
+    }
+
+    /** An obviously malicious tool is different, and blocks on a probe path without opting in. */
+    public function test_a_scanner_ua_on_a_probe_path_still_blocks(): void
+    {
+        $check = Funnypot::fromArray($this->config())
+            ->check($this->request('/.env', array('Host' => 'app.example.com', 'User-Agent' => 'sqlmap/1.7')));
+
+        self::assertTrue($check->shouldBlock());
+    }
+
+    /** The path carries the verdict, not the client: curl on a probe path is a probe. */
+    public function test_the_path_decides_not_the_user_agent(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config());
+
+        $curlOnProbe = $funnypot->check($this->request('/.env', $this->scriptingUa()));
+        $chromeOnProbe = $funnypot->check($this->request('/.env'));
+
+        self::assertSame($chromeOnProbe->kind(), $curlOnProbe->kind(), 'the path decides the kind');
+        self::assertTrue($curlOnProbe->shouldReport(), 'a probe is a probe whoever asks');
+        self::assertTrue($chromeOnProbe->shouldReport());
+    }
+
+    public function test_acting_on_scripting_uas_is_off_by_default(): void
+    {
+        $ambient = Funnypot::fromArray($this->config())
+            ->check($this->request('/robots.txt', $this->scriptingUa()));
+
+        self::assertFalse($ambient->shouldReport(), 'curl fetching robots.txt is not an incident');
+        self::assertSame('ambient', $ambient->reason());
+    }
+
+    /** Opt in and a scripting UA becomes reportable on ambient paths — still never blocking. */
+    public function test_acting_on_scripting_uas_can_be_opted_into(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array('act_on_scripting_uas' => true)));
+
+        $check = $funnypot->check($this->request('/robots.txt', $this->scriptingUa()));
+
+        self::assertTrue($check->shouldReport());
+        self::assertSame('scripting-ua', $check->reason());
+        self::assertFalse($check->shouldBlock(), 'opting in raises reporting, never blocking');
+    }
+
+    /** Opting in must not change a real browser. */
+    public function test_opting_in_does_not_affect_a_browser(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array('act_on_scripting_uas' => true)));
+
+        self::assertFalse($funnypot->check($this->request('/robots.txt'))->shouldReport());
+    }
+
 }

@@ -41,6 +41,9 @@ final class Detector
     /** @var Judge|null */
     private $judge;
 
+    /** @var bool opt-in: may a scripting UA (curl, python-requests) raise a report on its own? */
+    private $actOnScriptingUas;
+
     /**
      * @param array<string,true> $ambient
      */
@@ -49,13 +52,15 @@ final class Detector
         SiteProfile $profile,
         string $posture = Funnypot::PROFILE_APP,
         array $ambient = array(),
-        ?Judge $judge = null
+        ?Judge $judge = null,
+        bool $actOnScriptingUas = false
     ) {
         $this->engine = $engine;
         $this->profile = $profile;
         $this->posture = $posture;
         $this->ambient = $ambient === array() ? AmbientPaths::lookup() : $ambient;
         $this->judge = $judge;
+        $this->actOnScriptingUas = $actOnScriptingUas;
     }
 
     /**
@@ -95,7 +100,8 @@ final class Detector
                 isset($config['ambient_extra']) && is_array($config['ambient_extra']) ? $config['ambient_extra'] : array(),
                 isset($config['ambient_drop']) && is_array($config['ambient_drop']) ? $config['ambient_drop'] : array()
             ),
-            $judge
+            $judge,
+            isset($config['act_on_scripting_uas']) && $config['act_on_scripting_uas'] === true
         );
     }
 
@@ -242,9 +248,19 @@ final class Detector
                 return new Assessment($verdict, $kind, true, false, 'honeypot-profile');
             }
 
-            $scannerUa = $verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT);
+            // A NAMED scanner tool is worth a report even on a path everyone is asked for.
+            if ($verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT)) {
+                return new Assessment($verdict, $kind, true, false, 'scanner-ua');
+            }
 
-            return new Assessment($verdict, $kind, $scannerUa, false, $scannerUa ? 'scanner-ua' : 'ambient');
+            // A scripting UA is NOT, unless the host opts in. curl and python-requests against an
+            // API are the expected clients, so acting on them by default would report the
+            // integrations the app exists to serve. Reporting only — never blocking.
+            if ($this->actOnScriptingUas && $verdict->signals->uaClass === BotSignalSet::UA_SCRIPT) {
+                return new Assessment($verdict, $kind, true, false, 'scripting-ua');
+            }
+
+            return new Assessment($verdict, $kind, false, false, 'ambient');
         }
 
         // A honeypot that blocks has told the attacker it detected them.
