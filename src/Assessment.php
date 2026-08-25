@@ -88,6 +88,42 @@ final class Assessment
     }
 
     /**
+     * How strong this evidence is, as a graded increment rather than a bit.
+     *
+     * Hosts accumulate this against an actor and act on the total. Collapsing detection to one
+     * boolean is what turns a single false positive into an immediate ban — every hand-rolled
+     * scorer in the estate is graded for exactly that reason.
+     *
+     * The scale is funnypot-policy's, documented on `StateStoreInterface::decayScore`:
+     * **+1 soft / +10 medium / +100 hard-tell**. Using the same numbers means a host can feed
+     * this straight into policy's store without a translation table.
+     *
+     * Derived from kind(), NOT from a Judge — policy's `Decision` exposes no score of its own
+     * (it writes increments to its store internally and returns action/reason only). Deriving it
+     * here means the number means the same thing whether or not a Judge is configured, which is
+     * the property a host accumulating it actually needs.
+     *
+     * Distinct from anomaly(): that is request SHAPE (how odd the client looks), this is evidence
+     * STRENGTH (how sure we are the request is a probe). They are not interchangeable.
+     */
+    public function score(): int
+    {
+        if ($this->kind === Verdict::ATTACK_CLASS) {
+            return 100;
+        }
+        if ($this->kind === Verdict::SCANNER_PROBE) {
+            return 10;
+        }
+        if ($this->kind === self::AMBIENT) {
+            // A path every site is asked for. Soft on its own; a named scanner UA on the same
+            // request is what makes it worth acting on, and reason() records which case this is.
+            return $this->reason === 'scanner-ua' ? 10 : 1;
+        }
+
+        return 0;
+    }
+
+    /**
      * Cumulative request-shape anomaly. Evidence for the log row, NEVER a gate.
      *
      * Measured: it is path-blind — the same client scores the same on /robots.txt and on /.env —
@@ -140,6 +176,7 @@ final class Assessment
     {
         return array(
             'kind' => $this->kind,
+            'score' => $this->score(),
             'report' => $this->report,
             'block' => $this->block,
             'reason' => $this->reason,

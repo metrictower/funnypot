@@ -307,4 +307,41 @@ final class FunnypotTest extends TestCase
         self::assertTrue($check->shouldBlock());
         self::assertSame('mine', $check->reason());
     }
+
+    /**
+     * Evidence strength as a graded increment, on funnypot-policy's +1/+10/+100 scale so a host
+     * can feed it straight into a store. A boolean would make one false positive an instant ban.
+     */
+    public function test_score_is_graded_not_a_boolean(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config());
+
+        self::assertSame(0, $funnypot->check($this->request('/'))->score(), 'clean scores nothing');
+        self::assertSame(1, $funnypot->check($this->request('/favicon.ico'))->score(), 'ambient is soft');
+        self::assertSame(10, $funnypot->check($this->request('/.env'))->score(), 'a probe is medium');
+    }
+
+    /** An ambient path from a named scanner UA is stronger evidence than ambient alone. */
+    public function test_a_scanner_ua_on_an_ambient_path_scores_above_plain_ambient(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config());
+
+        $plain = $funnypot->check($this->request('/robots.txt'));
+        $scanner = $funnypot->check($this->request('/robots.txt', array(
+            'Host' => 'app.example.com',
+            'User-Agent' => 'Mozilla/5.0 zgrab/0.x',
+        )));
+
+        self::assertSame(1, $plain->score());
+        self::assertSame(10, $scanner->score());
+    }
+
+    public function test_score_is_in_the_log_row(): void
+    {
+        $row = Funnypot::fromArray($this->config())->check($this->request('/.env'))->toArray();
+
+        self::assertArrayHasKey('score', $row);
+        self::assertSame(10, $row['score']);
+    }
+
 }
