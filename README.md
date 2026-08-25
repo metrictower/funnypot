@@ -136,6 +136,45 @@ if ($check->shouldReport()) {
 
 `Funnypot` is a `Detector` plus delivery, and `$funnypot->detector()` hands back the inner one.
 
+## Operating modes
+
+Two independent choices: **where** it runs, and **what you do** with the answer.
+
+### Where — the mount point
+
+| mount | config | sees |
+|---|---|---|
+| **404 / NotFound handler** | `'own_routes' => Funnypot::ONLY_ON_404` | only unmatched requests |
+| **pre-request middleware** | `'own_routes' => fn($m, $p) => $router->has($m, $p)` | all traffic, before routing |
+
+The mount point is expressed *through the route oracle*, and that is why `own_routes` is required.
+In a 404 handler the framework has already ruled nothing reaching you is real, so `ONLY_ON_404` is
+a true statement. As middleware you see your own `/login`, and without a real oracle funnypot
+reports your own users — measured at 8 of 10 ordinary routes.
+
+### What — the posture
+
+`check()` returns a verdict; the host decides. Nothing here needs configuration:
+
+| posture | how |
+|---|---|
+| **log only** | read `$check->toArray()`, ignore both verbs. Good for a trial run |
+| **detect + report** | act on `shouldReport()` |
+| **block (WAF)** | act on `shouldBlock()` |
+| **honeypot / deceive** | `'profile' => PROFILE_HONEYPOT`, serve your own decoy |
+
+**Log-only needs no feature and no flag** — it is what you get by not acting on the verbs. That is
+the recommended way to start: run funnypot beside whatever you have, compare the two, and only then
+give it authority.
+
+### What is NOT available yet
+
+Everything above is **stateless** — each request is judged on its own. What funnypot cannot yet do
+for a framework-free host is **accumulate across requests**: scores that decay, ban thresholds,
+pins, an operator allowlist. That lives in `funnypot-policy` and needs a `StateStore` the Sensor
+does not yet ship (FP-0101). Until then, "funnypot as a WAF" means per-request blocking, not
+accumulate-and-ban.
+
 ## The two profiles
 
 ```php
