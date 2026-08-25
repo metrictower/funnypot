@@ -150,13 +150,18 @@ always populated either way, so a honeypot logs the same row a real app would.
 | `kind()` | report, APP | report, HONEYPOT | block, APP |
 |---|---|---|---|
 | `clean` | no | no | no |
-| `ambient` | only with a scanner UA | yes | no |
+| `ambient` | only with a scanner UA | yes, except `/robots.txt` | no |
 | `scanner-probe` | yes | yes | yes |
 | `attack-class` | yes | yes | yes |
 
 `shouldBlock()` is always false under `PROFILE_HONEYPOT`: a honeypot that blocks has told the
 attacker it detected them. Ambient paths are never blocked even from a scanner — refusing a
 `/robots.txt` fetch gains nothing and costs you a crawler the day the UA match is wrong.
+
+**`/robots.txt` is the one path exempt from `PROFILE_HONEYPOT`'s otherwise-unconditional ambient
+reporting.** A well-behaved crawler is expected to fetch it even on a box with nothing real behind
+it — that is what the file is for — so reporting compliant behaviour earns nothing. Every other
+ambient path still reports under `PROFILE_HONEYPOT`.
 
 ## What the Assessment will not let you do
 

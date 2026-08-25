@@ -160,7 +160,8 @@ final class Detector
     public function check(RequestContext $r): Assessment
     {
         $verdict = $this->engine->classify($r, $this->profile);
-        $kind = $this->kindOf($verdict, $r);
+        $path = self::stripQuery($r->path);
+        $kind = $this->kindOf($verdict, $path);
 
         if ($this->judge !== null) {
             $ruling = $this->judge->judge($verdict, $r, $this->posture);
@@ -174,7 +175,7 @@ final class Detector
             );
         }
 
-        return $this->rule($verdict, $kind);
+        return $this->rule($verdict, $kind, $path);
     }
 
     public function engine(): Honeypot
@@ -182,21 +183,22 @@ final class Detector
         return $this->engine;
     }
 
+    private static function stripQuery(string $path): string
+    {
+        $query = strpos($path, '?');
+
+        return $query === false ? $path : substr($path, 0, $query);
+    }
+
     /**
      * Ambient is a property of the PATH, checked only once core has already said "corpus hit".
      * A clean request stays clean, and a request core rates attack-class is never softened by
      * the path it came in on.
      */
-    private function kindOf(Verdict $verdict, RequestContext $r): string
+    private function kindOf(Verdict $verdict, string $path): string
     {
         if ($verdict->classification !== Verdict::SCANNER_PROBE) {
             return $verdict->classification;
-        }
-
-        $path = $r->path;
-        $query = strpos($path, '?');
-        if ($query !== false) {
-            $path = substr($path, 0, $query);
         }
 
         return isset($this->ambient[$path]) ? Assessment::AMBIENT : $verdict->classification;
@@ -214,8 +216,14 @@ final class Detector
      * classification at all and costs ~20x on the miss path, so a detection sensor leaves it off.
      * Blocking is safe here because the two ways a real visitor could reach this branch are both
      * already closed — a real route is fenced by the oracle, and browser chatter is ambient.
+     *
+     * /robots.txt is exempt from PROFILE_HONEYPOT's blanket ambient reporting (operator decision,
+     * 2026-08-25): a well-behaved crawler is expected to fetch it even on a box with nothing real
+     * behind it, and reporting compliant behaviour earns nothing. Scoped to PROFILE_HONEYPOT only
+     * — under PROFILE_APP, ambient reporting already requires SCANNER_USER_AGENT, which targets
+     * known scanner tooling rather than honest crawler UAs, so there is no equivalent gap to close.
      */
-    private function rule(Verdict $verdict, string $kind): Assessment
+    private function rule(Verdict $verdict, string $kind, string $path): Assessment
     {
         $honeypot = $this->posture === Funnypot::PROFILE_HONEYPOT;
 
@@ -227,6 +235,10 @@ final class Detector
         // gains nothing and costs you a crawler the day the UA match is wrong.
         if ($kind === Assessment::AMBIENT) {
             if ($honeypot) {
+                if ($path === '/robots.txt') {
+                    return new Assessment($verdict, $kind, false, false, 'robots-exempt');
+                }
+
                 return new Assessment($verdict, $kind, true, false, 'honeypot-profile');
             }
 

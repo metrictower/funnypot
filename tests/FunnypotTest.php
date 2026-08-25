@@ -170,12 +170,40 @@ final class FunnypotTest extends TestCase
     {
         $funnypot = Funnypot::fromArray($this->config(array('profile' => Funnypot::PROFILE_HONEYPOT)));
 
-        $ambient = $funnypot->check($this->request('/robots.txt'));
+        $ambient = $funnypot->check($this->request('/favicon.ico'));
         self::assertTrue($ambient->shouldReport(), 'nothing legitimate reaches a honeypot');
         self::assertSame(Assessment::AMBIENT, $ambient->kind(), 'the kind is unchanged by the profile');
 
         // Blocking would tell the attacker they were detected.
         self::assertFalse($funnypot->check($this->request('/.env'))->shouldBlock());
+    }
+
+    /**
+     * /robots.txt is the one ambient path exempt from PROFILE_HONEYPOT's otherwise-unconditional
+     * reporting. A well-behaved crawler is expected to fetch it even on a box with nothing real
+     * behind it, and reporting compliant behaviour earns nothing.
+     */
+    public function test_robots_txt_is_exempt_from_honeypot_reporting(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array('profile' => Funnypot::PROFILE_HONEYPOT)));
+
+        $check = $funnypot->check($this->request('/robots.txt'));
+
+        self::assertFalse($check->shouldReport());
+        self::assertSame(Assessment::AMBIENT, $check->kind(), 'evidence is unaffected by the exemption');
+        self::assertSame('robots-exempt', $check->reason());
+
+        // The exemption is scoped to /robots.txt only, and to PROFILE_HONEYPOT only.
+        self::assertTrue(
+            $funnypot->check($this->request('/favicon.ico'))->shouldReport(),
+            'other ambient paths are unaffected'
+        );
+
+        $app = Funnypot::fromArray($this->config());
+        self::assertFalse(
+            $app->check($this->request('/robots.txt'))->shouldReport(),
+            'PROFILE_APP already never reports robots.txt from a plain browser — nothing to exempt'
+        );
     }
 
     public function test_the_profile_moves_the_verbs_and_nothing_else(): void
