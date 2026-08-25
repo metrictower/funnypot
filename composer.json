@@ -3,11 +3,18 @@
     "description": "Batteries-included funnypot for any PHP app: funnypot-core detection wired to funnypot-mainnet-client reporting, with the request-path invariants already enforced. One require instead of assembling the pieces yourself.",
     "type": "library",
     "license": "proprietary",
-    "keywords": ["honeypot", "deception", "security", "scanner-detection", "ip-reputation", "funnypot"],
+    "keywords": [
+        "honeypot",
+        "deception",
+        "security",
+        "scanner-detection",
+        "ip-reputation",
+        "funnypot"
+    ],
     "require": {
         "php": ">=7.3",
-        "metrictower/funnypot-core": ">=0.0.1 <1.0",
-        "metrictower/funnypot-mainnet-client": ">=0.0.1 <1.0"
+        "metrictower/funnypot-core": "^0.2",
+        "metrictower/funnypot-mainnet-client": "^0.1"
     },
     "require-dev": {
         "phpunit/phpunit": "^9.5"
