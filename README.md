@@ -114,6 +114,28 @@ silently when the key, `self_ips`, or the queue path is missing — which for an
 "installed and working" until someone notices no reports ever arrived. `fromArray()` turns each of
 those into a constructor error instead.
 
+## Already have a queue?
+
+Mainnet delivery here rides a bundled SQLite queue. That is the right default for a framework-free
+app and the wrong one for Laravel or Symfony: N workers on an ephemeral container filesystem
+fragment the dedup state and the daily counter per worker, and lose both on redeploy.
+
+`Detector` is the judgement with no reporting attached — same `check()`, same `Assessment`, and it
+needs no mainnet key and no queue path because `check()` is pure:
+
+```php
+use Funnypot\Sensor\Detector;
+
+$detector = Detector::fromArray(['own_routes' => Funnypot::ONLY_ON_404]);
+
+$check = $detector->check($request);
+if ($check->shouldReport()) {
+    MyReportJob::dispatch($clientIp, $check->toArray());   // your queue, your delivery
+}
+```
+
+`Funnypot` is a `Detector` plus delivery, and `$funnypot->detector()` hands back the inner one.
+
 ## The two profiles
 
 ```php
