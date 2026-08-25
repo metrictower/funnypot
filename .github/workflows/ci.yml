@@ -1,0 +1,93 @@
+name: CI
+
+# metrictower/funnypot is the batteries-included embedder: funnypot-core detection wired to
+# funnypot-mainnet-client reporting. Both siblings are framework-free >=7.3, and so is this, so the
+# floor is exercised rather than asserted.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: [ '7.3', '8.0', '8.4', '8.5' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # pdo_sqlite backs the bundled report queue; curl is the report transport.
+          extensions: ctype, json, filter, curl, pdo_sqlite
+          coverage: none
+
+      - name: Lint
+        run: find src tests -name '*.php' -print0 | xargs -0 -n1 -P4 php -l >/dev/null
+
+      - name: Validate composer.json
+        run: composer validate --no-check-publish
+
+      - name: Install
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: PHPUnit
+        run: php vendor/bin/phpunit
+
+      - name: No namespace collisions across installed family packages
+        run: php vendor/metrictower/funnypot-core/scripts/ci/check-namespace-collisions.php .
+
+  consumer:
+    name: Installs as a dependency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pkg
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: ctype, json, filter, curl, pdo_sqlite
+          coverage: none
+
+      - name: Require from a scratch app
+        run: |
+          mkdir app && cd app
+          composer init --no-interaction --name=test/consumer --stability=dev
+          composer config repositories.pkg path ../pkg
+          composer require --no-interaction --prefer-dist --no-dev "metrictower/funnypot:*"
+
+      # The whole point of this package is that one `composer require` gives a working setup, so the
+      # smoke test is the README's own flow: build the facade, classify a probe, enqueue, drain.
+      - name: README flow works with no dev deps
+        run: |
+          cd app
+          php -r '
+            require "vendor/autoload.php";
+            $db = sys_get_temp_dir() . "/fp-ci-" . getmypid() . ".sqlite";
+            $fp = \Funnypot\Bundle\Funnypot::fromArray([
+              "base_url" => "https://mainnet.invalid",
+              "key" => "ci-key",
+              "self_ips" => ["203.0.113.7"],
+              "intel_db_path" => $db,
+            ]);
+            $ctx = new \Funnypot\Core\RequestContext("GET", "/wp-login.php", "", ["User-Agent" => "curl/8"], null, "example.com");
+            $d = $fp->inspect($ctx);
+            if (!$d->matched) { fwrite(STDERR, "expected /wp-login.php to match\n"); exit(1); }
+            $r = $fp->report("198.51.100.9", $d);
+            if (!$r["queued"]) { fwrite(STDERR, "expected a queued report, got: " . $r["reason"] . "\n"); exit(1); }
+            if ($fp->queuedCount() !== 1) { fwrite(STDERR, "expected 1 queued row\n"); exit(1); }
+            // A benign browser path must NOT be reportable — the severity floor is the guard.
+            $benign = $fp->inspect(new \Funnypot\Core\RequestContext("GET", "/robots.txt", "", [], null, "example.com"));
+            if ($fp->reportable($benign)) { fwrite(STDERR, "/robots.txt must not clear the floor\n"); exit(1); }
+            @unlink($db);
+            echo "ok\n";
+          '
