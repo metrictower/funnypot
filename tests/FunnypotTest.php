@@ -396,7 +396,14 @@ final class FunnypotTest extends TestCase
         // the user agent moved the verdict — which is what must not happen by default.
         $funnypot = Funnypot::fromArray($this->config());
 
-        foreach (array('curl/8.4.0', 'python-requests/2.31', 'Go-http-client/2.0', 'okhttp/4.12') as $ua) {
+        // python-httpx and SemrushBot were classed as scanners once, which made them act with no
+        // opt-in — the one thing this rule forbids. They stay in the list as the regression.
+        $uas = array(
+            'curl/8.4.0', 'python-requests/2.31', 'Go-http-client/2.0', 'okhttp/4.12',
+            'python-httpx/0.27.0', 'axios/1.6.0', 'Java/17', 'Apache-HttpClient/5.3',
+        );
+
+        foreach ($uas as $ua) {
             foreach (array('/', '/api/v1/users', '/some/missing/page', '/robots.txt') as $path) {
                 $script = $funnypot->check($this->request($path, $this->scriptingUa($ua)));
                 $browser = $funnypot->check($this->request($path));

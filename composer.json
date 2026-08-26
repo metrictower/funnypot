@@ -13,7 +13,7 @@
     ],
     "require": {
         "php": ">=7.3",
-        "metrictower/funnypot-core": "^0.5",
+        "metrictower/funnypot-core": "^0.6",
         "metrictower/funnypot-policy": "^0.2",
         "metrictower/funnypot-mainnet-client": "^0.1"
     },
