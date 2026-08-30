@@ -78,6 +78,9 @@ final class Funnypot
      * Required: 'key', 'self_ips', 'intel_db_path', and — under PROFILE_APP — 'own_routes'.
      * Each is a silent-skip path somewhere downstream, so each is validated loudly here.
      *
+     * Detection keys ('profile', 'own_routes', 'stack', 'ambient_extra', 'ambient_drop',
+     * 'ignore_templates', 'judge') pass straight through to Detector::fromArray().
+     *
      * @param array<string,mixed> $config
      */
     public static function fromArray(array $config): self

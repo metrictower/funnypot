@@ -114,6 +114,30 @@ silently when the key, `self_ips`, or the queue path is missing — which for an
 "installed and working" until someone notices no reports ever arrived. `fromArray()` turns each of
 those into a constructor error instead.
 
+## Silencing a noisy template
+
+When one template turns out to be a false positive on your site, you don't have to turn the sensor
+off — silence just that template with `ignore_templates`. The id to name is already in every report:
+`Assessment::templateIds()` lists the templates that drove a classification, so a false-positive log
+line hands you the exact id.
+
+```php
+$detector = Detector::fromArray([
+    'own_routes'       => Funnypot::ONLY_ON_404,
+    'ignore_templates' => ['laravel-telescope', 'miscellaneous'],   // template ids AND tags
+]);
+```
+
+An ignored template contributes **no evidence**: a request whose only matching templates are listed
+classifies `clean` and is never reported, while a request that also matches a template you did *not*
+list is still reported on that remaining one (drop-from-evidence). Both ids and tags are accepted, so
+a whole noisy tag can go in one entry.
+
+This is the template-side lever; `ambient_extra` / `ambient_drop` are the path-side one. Reach for
+`ignore_templates` when a specific template misfires; reach for the ambient lists when a whole path
+is browser chatter. (It is unrelated to core's serving-side `exclude`, which a detection sensor never
+serves through.)
+
 ## Already have a queue?
 
 Mainnet delivery here rides a bundled SQLite queue. That is the right default for a framework-free

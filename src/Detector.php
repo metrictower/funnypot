@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Funnypot\Sensor;
 
 use Funnypot\Core\BotSignalSet;
+use Funnypot\Core\Config as CoreConfig;
 use Funnypot\Core\Honeypot;
 use Funnypot\Core\RequestContext;
 use Funnypot\Core\SiteProfile;
@@ -65,8 +66,8 @@ final class Detector
 
     /**
      * Build from a plain config array. Accepts the same detection keys Funnypot::fromArray() does
-     * — 'profile', 'own_routes', 'stack', 'ambient_extra', 'ambient_drop', 'judge' — and none of
-     * the reporting ones.
+     * — 'profile', 'own_routes', 'stack', 'ambient_extra', 'ambient_drop', 'ignore_templates',
+     * 'judge' — and none of the reporting ones.
      *
      * @param array<string,mixed> $config
      */
@@ -93,7 +94,7 @@ final class Detector
         }
 
         return new self(
-            Honeypot::default(),
+            Honeypot::default(self::coreConfig($config)),
             self::buildSiteProfile($config, $posture),
             $posture,
             AmbientPaths::lookup(
@@ -154,6 +155,39 @@ final class Detector
         return new SiteProfile($stack, static function ($method, $path) use ($routes) {
             return (bool) call_user_func($routes, $method, $path);
         });
+    }
+
+    /**
+     * The core Config the sensor drives the engine with. The sensor is detection-only, so this is
+     * core's inert default plus the one detection knob it exposes: 'ignore_templates'.
+     *
+     * 'ignore_templates' silences templates on the DETECTION side — a request whose only matching
+     * templates are listed classifies clean and is never reported. It accepts template ids AND tags;
+     * find the id to list by reading Assessment::templateIds() off a false-positive report. It is a
+     * per-deployment property (a template noisy on this site is noisy on every call site), so it is
+     * config here, never a call-site argument. It is NOT core's 'exclude', which governs SERVING and
+     * has no meaning for a detection sensor.
+     *
+     * @param array<string,mixed> $config
+     */
+    private static function coreConfig(array $config): CoreConfig
+    {
+        $ignore = array();
+        if (isset($config['ignore_templates'])) {
+            if (!is_array($config['ignore_templates'])) {
+                throw new InvalidArgumentException(
+                    'funnypot: "ignore_templates" must be an array of template ids or tags to exclude '
+                    . 'from detection. Read the id to list off a false-positive report with '
+                    . 'Assessment::templateIds().'
+                );
+            }
+            $ignore = array_values(array_map('strval', $config['ignore_templates']));
+        }
+
+        $core = new CoreConfig();
+        $core->ignoreTemplates = $ignore;
+
+        return $core;
     }
 
     /**

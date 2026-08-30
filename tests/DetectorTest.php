@@ -67,6 +67,74 @@ final class DetectorTest extends TestCase
         }
     }
 
+    public function test_ignore_templates_suppresses_detection_end_to_end(): void
+    {
+        $probe = $this->request('/.env');
+
+        // Baseline: /.env is a reportable probe, and it names the ids driving it.
+        $base = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404));
+        $before = $base->check($probe);
+        self::assertTrue($before->shouldReport());
+        $ids = $before->templateIds();
+        self::assertNotEmpty($ids);
+
+        // Ignoring exactly those ids drops the evidence: it classifies clean and is not reported.
+        $silenced = Detector::fromArray(array(
+            'own_routes' => Funnypot::ONLY_ON_404,
+            'ignore_templates' => $ids,
+        ));
+        $after = $silenced->check($probe);
+        self::assertFalse($after->shouldReport());
+        self::assertSame('clean', $after->kind());
+        self::assertSame(array(), $after->templateIds());
+    }
+
+    public function test_ignore_templates_leaves_other_probes_reporting(): void
+    {
+        // Silencing one path's templates must not silence a different probe path.
+        $base = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404));
+        $envIds = $base->check($this->request('/.env'))->templateIds();
+        self::assertNotEmpty($envIds);
+
+        $detector = Detector::fromArray(array(
+            'own_routes' => Funnypot::ONLY_ON_404,
+            'ignore_templates' => $envIds,
+        ));
+
+        self::assertFalse($detector->check($this->request('/.env'))->shouldReport());
+        self::assertTrue($detector->check($this->request('/.git/config'))->shouldReport());
+    }
+
+    public function test_ignore_templates_must_be_an_array(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/"ignore_templates" must be an array/');
+
+        Detector::fromArray(array(
+            'own_routes' => Funnypot::ONLY_ON_404,
+            'ignore_templates' => 'git-config',
+        ));
+    }
+
+    public function test_the_facade_plumbs_ignore_templates(): void
+    {
+        $probe = $this->request('/.env');
+        $ids = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404))
+            ->check($probe)->templateIds();
+        self::assertNotEmpty($ids);
+
+        $funnypot = Funnypot::fromArray(array(
+            'base_url' => 'https://mainnet.example',
+            'key' => 'test-key',
+            'self_ips' => array('203.0.113.7'),
+            'intel_db_path' => ':memory:',
+            'own_routes' => Funnypot::ONLY_ON_404,
+            'ignore_templates' => $ids,
+        ));
+
+        self::assertFalse($funnypot->check($probe)->shouldReport());
+    }
+
     public function test_the_facade_exposes_its_detector(): void
     {
         $funnypot = Funnypot::fromArray(array(
