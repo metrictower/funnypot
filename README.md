@@ -221,6 +221,12 @@ pins, an operator allowlist. That lives in `funnypot-policy` and needs a `StateS
 does not yet ship (FP-0101). Until then, "funnypot as a WAF" means per-request blocking, not
 accumulate-and-ban.
 
+`Assessment::score()` already hands you the number to accumulate: a graded `+1` / `+10` / `+100`
+on funnypot-policy's own scale (`StateStoreInterface::decayScore`), derived from `kind()` so it
+means the same thing whether or not a `Judge` is configured. A host that wants banning today can
+feed it into its own store against `funnypot-policy` directly; Funnypot itself just doesn't wire
+that loop up for you yet.
+
 ## The two profiles
 
 ```php
@@ -229,8 +235,8 @@ accumulate-and-ban.
 ```
 
 The profile moves `shouldReport()` / `shouldBlock()` and **nothing else**. Evidence on the
-`Assessment` — `kind()`, `severity()`, `anomaly()`, `signals()`, `templateIds()`, `tags()` — is
-always populated either way, so a honeypot logs the same row a real app would.
+`Assessment` — `kind()`, `severity()`, `score()`, `anomaly()`, `signals()`, `templateIds()`,
+`tags()` — is always populated either way, so a honeypot logs the same row a real app would.
 
 | `kind()` | report, APP | report, HONEYPOT | block, APP |
 |---|---|---|---|
