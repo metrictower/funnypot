@@ -529,6 +529,171 @@ final class FunnypotTest extends TestCase
         self::assertSame(1, $funnypot->queuedCount(), 'the default rules still report the probe');
     }
 
+    // ── what survives a Judge: the guarantees a ruling cannot waive ──
+
+    /** A Judge that returns the same ruling for every request. */
+    private function fixedJudge(array $ruling): Judge
+    {
+        return new class($ruling) implements Judge {
+            /** @var array<string,mixed> */
+            private $ruling;
+
+            public function __construct(array $ruling)
+            {
+                $this->ruling = $ruling;
+            }
+
+            public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+            {
+                return $this->ruling;
+            }
+        };
+    }
+
+    /**
+     * The blinding case. Ambient is the SENSOR's classification — core's Verdict says
+     * scanner-probe for /robots.txt — so the obvious Judge, "report anything that is not clean",
+     * reports every browser's favicon fetch. Mainnet dedups on the IP alone for 24 hours, so that
+     * one benign report drops the real probe behind it.
+     */
+    public function test_a_judge_cannot_report_or_block_a_browser_on_an_ambient_path(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => true, 'reason' => 'mine')),
+        )));
+
+        foreach (array('/robots.txt', '/favicon.ico', '/sitemap.xml') as $path) {
+            $check = $funnypot->check($this->request($path), '198.51.100.1');
+
+            self::assertSame(Assessment::AMBIENT, $check->kind(), $path);
+            self::assertFalse($check->shouldReport(), $path . ': a browser on an ambient path is never reported, Judge or not');
+            self::assertFalse($check->shouldBlock(), $path . ': an ambient path is never blocked, Judge or not');
+            self::assertSame('mine', $check->reason(), 'the Judge keeps its label; only the verbs are clamped');
+        }
+    }
+
+    public function test_a_judge_cannot_block_under_the_honeypot_profile(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'profile' => Funnypot::PROFILE_HONEYPOT,
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => true, 'reason' => 'mine')),
+        )));
+
+        $check = $funnypot->check($this->request('/.env'), '198.51.100.1');
+
+        self::assertFalse($check->shouldBlock(), 'a honeypot that blocks has told the attacker it was detected');
+        self::assertTrue($check->shouldReport(), 'the report stands: nothing legitimate reaches a honeypot');
+    }
+
+    public function test_robots_txt_stays_exempt_from_honeypot_reporting_under_a_judge(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'profile' => Funnypot::PROFILE_HONEYPOT,
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => false, 'reason' => 'mine')),
+        )));
+
+        self::assertFalse($funnypot->check($this->request('/robots.txt'), '198.51.100.1')->shouldReport());
+        self::assertTrue(
+            $funnypot->check($this->request('/favicon.ico'), '198.51.100.1')->shouldReport(),
+            'every other ambient path still reports under PROFILE_HONEYPOT'
+        );
+    }
+
+    /** The clamp is a ceiling. A Judge that says no — an allowlist, a dry run — is always honoured. */
+    public function test_a_judge_may_still_suppress_a_report_on_an_ambient_path(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'judge' => $this->fixedJudge(array('report' => false, 'block' => false, 'reason' => 'allowlisted')),
+        )));
+
+        $check = $funnypot->check($this->request('/robots.txt', $this->scannerUa()), '198.51.100.1');
+
+        self::assertFalse($check->shouldReport());
+        self::assertSame('allowlisted', $check->reason());
+    }
+
+    public function test_a_judge_may_report_a_scanner_on_an_ambient_path_but_never_block_it(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => true, 'reason' => 'mine')),
+        )));
+
+        $check = $funnypot->check($this->request('/robots.txt', $this->scannerUa()), '198.51.100.1');
+
+        self::assertTrue($check->shouldReport(), 'a named scanner UA is the evidence the default rules report on too');
+        self::assertFalse($check->shouldBlock(), 'ambient paths are never blocked');
+    }
+
+    /** The scripting-UA opt-in gates ambient reporting the same way with a Judge as without one. */
+    public function test_the_scripting_ua_opt_in_gates_ambient_reporting_under_a_judge_too(): void
+    {
+        $ruling = array('report' => true, 'block' => true, 'reason' => 'mine');
+        $off = Funnypot::fromArray($this->config(array('judge' => $this->fixedJudge($ruling))));
+        $on = Funnypot::fromArray($this->config(array(
+            'judge' => $this->fixedJudge($ruling),
+            'act_on_scripting_uas' => true,
+        )));
+        $curl = $this->request('/robots.txt', $this->scriptingUa());
+
+        self::assertFalse(
+            $off->check($curl, '198.51.100.1')->shouldReport(),
+            'curl fetching robots.txt is not an incident until the host opts in'
+        );
+        self::assertTrue($on->check($curl, '198.51.100.1')->shouldReport());
+        self::assertFalse($on->check($curl, '198.51.100.1')->shouldBlock(), 'opting in raises reporting, never blocking');
+    }
+
+    /**
+     * On the host's own routes the Judge is the WAF. The sensor cannot know why it blocked — a
+     * brute-force counter, a rate limit, a reputation hit — so block is left alone, from a
+     * browser and from curl alike. Only the report is clamped: a declared route is the host's
+     * own traffic, and one benign report is worse than none.
+     */
+    public function test_a_judge_keeps_its_authority_to_block_on_a_declared_route(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'own_routes' => static function ($method, $path) {
+                return $path === '/login' || $path === '/api/v1/auth';
+            },
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => true, 'reason' => 'brute-force')),
+        )));
+
+        $checks = array(
+            'browser' => $funnypot->check(
+                new RequestContext('POST', '/login', '', self::CHROME, null, 'app.example.com'),
+                '198.51.100.1'
+            ),
+            'curl' => $funnypot->check(
+                new RequestContext('POST', '/api/v1/auth', '', $this->scriptingUa(), null, 'app.example.com'),
+                '198.51.100.1'
+            ),
+        );
+
+        foreach ($checks as $client => $check) {
+            self::assertSame(Verdict::CLEAN, $check->kind(), $client);
+            self::assertTrue($check->shouldBlock(), $client . ': the Judge blocks on a declared route');
+            self::assertFalse($check->shouldReport(), $client . ': a declared route is never reported');
+        }
+    }
+
+    public function test_a_ruling_missing_its_verbs_defaults_to_neither(): void
+    {
+        $bare = Funnypot::fromArray($this->config(array('judge' => $this->fixedJudge(array('reason' => 'custom')))))
+            ->check($this->request('/.env'), '198.51.100.1');
+
+        self::assertFalse($bare->shouldReport());
+        self::assertFalse($bare->shouldBlock());
+        self::assertFalse($bare->shouldDeceive());
+        self::assertSame('custom', $bare->reason());
+
+        $unlabelled = Funnypot::fromArray($this->config(array(
+            'judge' => $this->fixedJudge(array('report' => true, 'block' => true, 'reason' => '')),
+        )))->check($this->request('/.env'), '198.51.100.1');
+
+        self::assertTrue($unlabelled->shouldBlock());
+        self::assertSame('judge', $unlabelled->reason(), 'an empty label is no label');
+    }
+
 
     // ── FP-0105: the path is the signal; a scripting UA is weak corroboration ──
 
@@ -536,6 +701,12 @@ final class FunnypotTest extends TestCase
     private function scriptingUa(string $ua = 'curl/8.4.0'): array
     {
         return array('Host' => 'app.example.com', 'User-Agent' => $ua);
+    }
+
+    /** @return array<string,string> */
+    private function scannerUa(): array
+    {
+        return array('Host' => 'app.example.com', 'User-Agent' => 'sqlmap/1.7');
     }
 
     /**

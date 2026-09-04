@@ -6,6 +6,7 @@ namespace Funnypot\Sensor\Tests;
 
 use Funnypot\Core\RequestContext;
 use Funnypot\Core\Verdict;
+use Funnypot\Sensor\AmbientPaths;
 use Funnypot\Sensor\Assessment;
 use Funnypot\Sensor\Detector;
 use Funnypot\Sensor\Funnypot;
@@ -106,6 +107,33 @@ final class DetectorTest extends TestCase
         // With no Judge at all the two agree exactly.
         $plain = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404));
         self::assertSame($plain->check($probe)->toArray(), $plain->checkPure($probe)->toArray());
+    }
+
+    /**
+     * A Judge replaces the default judgement, not the ambient guarantee. This is the Judge anyone
+     * writes first — report whatever core did not call clean — and on every ambient path a
+     * browser must come out exactly as it does under the default rules: not reported.
+     */
+    public function test_a_judge_cannot_report_a_browser_on_any_ambient_path(): void
+    {
+        $judge = new class implements Judge {
+            public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+            {
+                return array('report' => !$verdict->isClean(), 'block' => false, 'reason' => 'not-clean');
+            }
+        };
+        $detector = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404, 'judge' => $judge));
+
+        foreach (array_keys(AmbientPaths::lookup()) as $path) {
+            $judged = $detector->check($this->request($path), '198.51.100.1');
+
+            self::assertFalse($judged->shouldReport(), $path . ' must not be reported for a browser under a Judge');
+            self::assertSame(
+                $detector->checkPure($this->request($path))->shouldReport(),
+                $judged->shouldReport(),
+                $path . ' must report no more often under a Judge than under the default rules'
+            );
+        }
     }
 
     public function test_ignore_templates_suppresses_detection_end_to_end(): void

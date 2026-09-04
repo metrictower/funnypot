@@ -15,7 +15,8 @@
 caret range (`^0.5`) rather than tracking a branch. **0.4 rewrote the whole surface** —
 `inspect()`/`reportable()`/`min_severity` are gone; see *What the Assessment will not let you do*.
 **0.5 reshapes the `Judge` seam** — `judge()` takes a `JudgeContext`, `check()` takes the client IP,
-and the `Assessment` can say `shouldDeceive()`; see *Bringing your own Judge*.
+the `Assessment` can say `shouldDeceive()`, and the ambient and honeypot guarantees now hold under a
+Judge; see *Bringing your own Judge*.
 
 The batteries-included entry point: [`funnypot-core`](https://github.com/metrictower/funnypot-core)
 detection wired to [`funnypot-mainnet-client`](https://github.com/metrictower/funnypot-mainnet-client)
@@ -103,7 +104,7 @@ Two axes were measured and both were rejected:
 So the judgement turns on the **path property** plus named signal flags. `Assessment::AMBIENT`
 covers the ~17 exact paths a site is asked for whether or not it has them, and it costs 10 of the
 corpus's 5,196 route keys. Tune it with `ambient_extra` / `ambient_drop`; replace the judgement
-wholesale with a `Judge`.
+with a `Judge` — which keeps the ambient guarantee; see *What survives a Judge*.
 
 **One benign report is worse than no report.** The mainnet dedup key is the IP alone, marked at
 enqueue, over a 24-hour window. A benign `/robots.txt` report consumes that IP's slot, and the same
@@ -210,8 +211,10 @@ So by default a scripting UA (`curl`, `python-requests`, `wget`, `Go-http-client
 the same path returns the same verdict whoever asks. Only **named scanner tools** (`nikto`,
 `sqlmap`, `zgrab`, `nuclei`) act on their own.
 
-Turn this on and a scripting UA additionally makes an **ambient** path reportable. It never causes
-blocking, at any setting.
+Turn this on and a scripting UA additionally makes an **ambient** path reportable — with a Judge as
+without one. In the built-in rules it never causes blocking, at any setting. A Judge keeps its own
+authority to block on your declared routes (see *What survives a Judge*); an ambient path is never
+blocked either way.
 
 **Think hard before enabling it on an API host.** `curl` and `python-requests` against `/api/` are
 the *expected* clients — they are the integrations your app exists to serve. The signal is really
@@ -220,7 +223,7 @@ form, and treating it as a property of the client alone is what produces the fal
 
 ### Bringing your own Judge
 
-`'judge' => $judge` replaces the default rules wholesale with a `Funnypot\Sensor\Judge` — the seam
+`'judge' => $judge` replaces the default judgement with a `Funnypot\Sensor\Judge` — the seam
 `funnypot-policy` plugs into. It is handed the core `Verdict`, the `RequestContext`, and a
 `JudgeContext` carrying the three things neither of those has: `posture()` (`PROFILE_APP` /
 `PROFILE_HONEYPOT`), `ip()`, and `profile()` — core's `SiteProfile`, so `hasRoute($method, $path)`
@@ -249,6 +252,32 @@ Three things follow from a Judge being there:
   Judge reads and writes its store on every ruling. Call `check()` once per request, and use
   `Detector::checkPure()` — the default rules, Judge or not — anywhere the same request is seen a
   second time. `MainnetObserver` already does.
+
+#### What survives a Judge
+
+A Judge replaces the judgement, not the guarantees behind it. Its ruling passes through one clamp
+on the way out — `Detector::clamp()`, the single list, so the next guarantee is added there rather
+than rediscovered — and every entry is a **ceiling**: it can clear a verb the ruling set, never set
+one the ruling cleared. A Judge that says no — an allowlist, a dry run — is always honoured.
+
+| whatever the ruling said | the `Assessment` says |
+|---|---|
+| block, with a `fake` | `shouldBlock()` false — a block beside a fake is a tell |
+| block, under `PROFILE_HONEYPOT` | `shouldBlock()` false — a honeypot that blocks has announced itself |
+| block, on an `ambient` path | `shouldBlock()` false — refusing `/robots.txt` costs you a crawler |
+| report, on an `ambient` path | `shouldReport()` true only where the default rules would say so: a named scanner UA, a scripting UA under `act_on_scripting_uas`, or `PROFILE_HONEYPOT` off `/robots.txt` |
+| report, on a `clean` / `suspicious` request | `shouldReport()` false — a declared route is your own traffic |
+
+The ambient row is the one that matters. Ambient is the *sensor's* classification — core's
+`Verdict` says `scanner-probe` for `/robots.txt` — so the obvious Judge, "report anything not
+clean", reports every browser's favicon fetch, and one such report spends that IP's 24-hour mainnet
+dedup slot (see *One benign report is worse than no report*). A Judge cannot see the ambient list,
+so it cannot avoid this itself; the sensor does it for every Judge.
+
+What a Judge keeps is everything on your own routes. On a declared route it is the WAF — the sensor
+cannot know whether it blocked for a brute-force counter, a rate limit or a reputation hit — so
+`block` there is the Judge's alone, from a browser and from `curl` alike. `reason()` is always the
+Judge's own label, clamped or not.
 
 ### What is NOT available yet
 
@@ -282,9 +311,10 @@ The profile moves `shouldReport()` / `shouldBlock()` and **nothing else**. Evide
 | `scanner-probe` | yes | yes | yes |
 | `attack-class` | yes | yes | yes |
 
-`shouldBlock()` is always false under `PROFILE_HONEYPOT`: a honeypot that blocks has told the
-attacker it detected them. Ambient paths are never blocked even from a scanner — refusing a
-`/robots.txt` fetch gains nothing and costs you a crawler the day the UA match is wrong.
+`shouldBlock()` is always false under `PROFILE_HONEYPOT`, with or without a Judge: a honeypot that
+blocks has told the attacker it detected them. Ambient paths are never blocked even from a scanner,
+with or without a Judge — refusing a `/robots.txt` fetch gains nothing and costs you a crawler the
+day the UA match is wrong.
 
 **`/robots.txt` is the one path exempt from `PROFILE_HONEYPOT`'s otherwise-unconditional ambient
 reporting.** A well-behaved crawler is expected to fetch it even on a box with nothing real behind

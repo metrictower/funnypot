@@ -193,6 +193,8 @@ final class Assessment
      *
      * With a Judge configured it is the Judge's own label ('judge' when it gives none), or
      * 'no-client-ip' when check() was called without the IP the Judge needs and failed open.
+     * The label stays the Judge's even where the sensor cleared a verb the ruling had set
+     * (Detector::clamp()); the verbs say what happens, the reason says who decided.
      */
     public function reason(): string
     {

@@ -203,6 +203,9 @@ final class Detector
      * be stricter than the Judge and bypass whatever allowlist the host's policy carries. The
      * default rules need no IP and ignore it.
      *
+     * A Judge replaces the default judgement, not every guarantee behind it: its ruling passes
+     * through clamp() on the way out, and that is the one list of what survives a Judge.
+     *
      * Uses classify(), NOT detect(). detect() projects the Verdict down to its Detection and
      * throws the classification away, so core would conclude CLEAN while the Detection still
      * read matched=true at critical severity.
@@ -223,16 +226,55 @@ final class Detector
 
         $ruling = $this->judge->judge($verdict, $r, new JudgeContext($this->posture, $ip, $this->profile));
         $fake = isset($ruling['fake']) && is_object($ruling['fake']) ? $ruling['fake'] : null;
+        $reason = isset($ruling['reason']) && is_string($ruling['reason']) && $ruling['reason'] !== ''
+            ? $ruling['reason']
+            : 'judge';
 
-        return new Assessment(
+        list($report, $block) = $this->clamp(
             $verdict,
             $kind,
+            $path,
             !empty($ruling['report']),
-            // A ruling that deceives never blocks: blocking is a tell, and deceive exists to avoid it.
-            $fake === null && !empty($ruling['block']),
-            isset($ruling['reason']) ? (string) $ruling['reason'] : 'judge',
-            $fake
+            !empty($ruling['block']),
+            $fake !== null
         );
+
+        return new Assessment($verdict, $kind, $report, $block, $reason, $fake);
+    }
+
+    /**
+     * What survives a Judge. Each of these is a promise the package makes to the host or to
+     * mainnet, and a ruling cannot waive it. Every clamp is a ceiling — it only ever clears a
+     * verb, never raises one — so a Judge that says no (an allowlist, a dry run) is always
+     * honoured. Anything a Judge must not be able to do goes here and nowhere else.
+     *
+     *  - A ruling that deceives never blocks: blocking is a tell, and deceive exists to avoid it.
+     *  - PROFILE_HONEYPOT never blocks: a honeypot that blocks has told the attacker it was seen.
+     *  - An ambient path is never blocked, whoever asks — see rule().
+     *  - An ambient path is reported only where the default rules would report it. Ambient is the
+     *    SENSOR's classification: core's Verdict says scanner-probe for /robots.txt, so a Judge
+     *    ruling on the Verdict alone reports every browser's favicon fetch. Mainnet dedups on the
+     *    IP alone for 24 hours, so that one benign report drops the real probe behind it — the
+     *    blinding the ambient list exists to prevent, and a Judge cannot see the list to avoid it.
+     *  - A clean or suspicious request is never reported: a declared route is the host's own
+     *    traffic, and one benign report is worse than none. Block is left to the Judge there —
+     *    on the host's own routes it is the WAF, and the sensor cannot know why it refused.
+     *
+     * @return array{0:bool,1:bool} report, block
+     */
+    private function clamp(Verdict $verdict, string $kind, string $path, bool $report, bool $block, bool $deceives): array
+    {
+        if ($deceives || $this->posture === Funnypot::PROFILE_HONEYPOT || $kind === Assessment::AMBIENT) {
+            $block = false;
+        }
+
+        if ($kind === Verdict::CLEAN || $kind === Verdict::SUSPICIOUS) {
+            $report = false;
+        } elseif ($kind === Assessment::AMBIENT) {
+            $report = $report && $this->ambientReportReason($verdict, $path) !== null;
+        }
+
+        return array($report, $block);
     }
 
     /**
@@ -288,12 +330,6 @@ final class Detector
      * classification at all and costs ~20x on the miss path, so a detection sensor leaves it off.
      * Blocking is safe here because the two ways a real visitor could reach this branch are both
      * already closed — a real route is fenced by the oracle, and browser chatter is ambient.
-     *
-     * /robots.txt is exempt from PROFILE_HONEYPOT's blanket ambient reporting (operator decision,
-     * 2026-08-25): a well-behaved crawler is expected to fetch it even on a box with nothing real
-     * behind it, and reporting compliant behaviour earns nothing. Scoped to PROFILE_HONEYPOT only
-     * — under PROFILE_APP, ambient reporting already requires SCANNER_USER_AGENT, which targets
-     * known scanner tooling rather than honest crawler UAs, so there is no equivalent gap to close.
      */
     private function rule(Verdict $verdict, string $kind, string $path): Assessment
     {
@@ -306,32 +342,49 @@ final class Detector
         // Ambient paths are never blocked, even from a scanner. Refusing a /robots.txt fetch
         // gains nothing and costs you a crawler the day the UA match is wrong.
         if ($kind === Assessment::AMBIENT) {
-            if ($honeypot) {
-                if ($path === '/robots.txt') {
-                    return new Assessment($verdict, $kind, false, false, 'robots-exempt');
-                }
-
-                return new Assessment($verdict, $kind, true, false, 'honeypot-profile');
+            $reason = $this->ambientReportReason($verdict, $path);
+            if ($reason !== null) {
+                return new Assessment($verdict, $kind, true, false, $reason);
             }
 
-            // A NAMED scanner tool is worth a report even on a path everyone is asked for.
-            if ($verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT)) {
-                return new Assessment($verdict, $kind, true, false, 'scanner-ua');
-            }
-
-            // A scripting UA is NOT, unless the host opts in. curl and python-requests against an
-            // API are the expected clients, so acting on them by default would report the
-            // integrations the app exists to serve. Reporting only — never blocking.
-            if ($this->actOnScriptingUas && $verdict->signals->uaClass === BotSignalSet::UA_SCRIPT) {
-                return new Assessment($verdict, $kind, true, false, 'scripting-ua');
-            }
-
-            return new Assessment($verdict, $kind, false, false, 'ambient');
+            return new Assessment($verdict, $kind, false, false, $honeypot ? 'robots-exempt' : 'ambient');
         }
 
         // A honeypot that blocks has told the attacker it detected them.
         $reason = $honeypot ? 'honeypot-profile' : ($kind === Verdict::ATTACK_CLASS ? 'attack' : 'probe');
 
         return new Assessment($verdict, $kind, true, !$honeypot, $reason);
+    }
+
+    /**
+     * Why an ambient path is worth a report, as the reason label — null when it is not. The one
+     * definition of the ambient ceiling: the default rules report on it and clamp() holds a Judge
+     * to it, so the two cannot drift.
+     *
+     * /robots.txt is exempt from PROFILE_HONEYPOT's blanket ambient reporting (operator decision,
+     * 2026-08-25): a well-behaved crawler is expected to fetch it even on a box with nothing real
+     * behind it, and reporting compliant behaviour earns nothing. Scoped to PROFILE_HONEYPOT only
+     * — under PROFILE_APP, ambient reporting already requires SCANNER_USER_AGENT, which targets
+     * known scanner tooling rather than honest crawler UAs, so there is no equivalent gap to close.
+     */
+    private function ambientReportReason(Verdict $verdict, string $path): ?string
+    {
+        if ($this->posture === Funnypot::PROFILE_HONEYPOT) {
+            return $path === '/robots.txt' ? null : 'honeypot-profile';
+        }
+
+        // A NAMED scanner tool is worth a report even on a path everyone is asked for.
+        if ($verdict->signals->has(BotSignalSet::SCANNER_USER_AGENT)) {
+            return 'scanner-ua';
+        }
+
+        // A scripting UA is NOT, unless the host opts in. curl and python-requests against an
+        // API are the expected clients, so acting on them by default would report the
+        // integrations the app exists to serve. Reporting only — never blocking.
+        if ($this->actOnScriptingUas && $verdict->signals->uaClass === BotSignalSet::UA_SCRIPT) {
+            return 'scripting-ua';
+        }
+
+        return null;
     }
 }
