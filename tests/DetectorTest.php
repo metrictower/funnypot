@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace Funnypot\Sensor\Tests;
 
 use Funnypot\Core\RequestContext;
+use Funnypot\Core\Verdict;
 use Funnypot\Sensor\Assessment;
 use Funnypot\Sensor\Detector;
 use Funnypot\Sensor\Funnypot;
+use Funnypot\Sensor\Judge;
+use Funnypot\Sensor\JudgeContext;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
@@ -58,13 +61,51 @@ final class DetectorTest extends TestCase
             'intel_db_path' => ':memory:',
         ));
 
+        // One side is handed a client IP: under the default rules it is inert.
         foreach (array('/', '/.env', '/robots.txt', '/wp-login.php', '/favicon.ico') as $path) {
             self::assertSame(
                 $detector->check($this->request($path))->toArray(),
-                $funnypot->check($this->request($path))->toArray(),
+                $funnypot->check($this->request($path), '198.51.100.1')->toArray(),
                 $path . ' must judge identically either way'
             );
         }
+    }
+
+    /**
+     * checkPure() is check() under the default rules whatever Judge is configured — for call
+     * sites that see a request the host has already judged, where a stateful Judge must not run
+     * a second time.
+     */
+    public function test_check_pure_never_consults_the_judge(): void
+    {
+        $judge = new class implements Judge {
+            /** @var int */
+            public $calls = 0;
+
+            public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+            {
+                $this->calls++;
+
+                return array('report' => false, 'block' => false, 'reason' => 'mine');
+            }
+        };
+        $detector = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404, 'judge' => $judge));
+        $probe = $this->request('/.env');
+
+        $pure = $detector->checkPure($probe);
+        self::assertSame(0, $judge->calls);
+        self::assertTrue($pure->shouldReport());
+        self::assertTrue($pure->shouldBlock());
+        self::assertSame('probe', $pure->reason());
+
+        // The same Detector's check() does consult it.
+        $judged = $detector->check($probe, '198.51.100.1');
+        self::assertSame(1, $judge->calls);
+        self::assertSame('mine', $judged->reason());
+
+        // With no Judge at all the two agree exactly.
+        $plain = Detector::fromArray(array('own_routes' => Funnypot::ONLY_ON_404));
+        self::assertSame($plain->check($probe)->toArray(), $plain->checkPure($probe)->toArray());
     }
 
     public function test_ignore_templates_suppresses_detection_end_to_end(): void

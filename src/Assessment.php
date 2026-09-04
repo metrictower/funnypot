@@ -11,8 +11,8 @@ use LogicException;
 /**
  * What funnypot concluded about one request, and what you should do about it.
  *
- * Two verbs, and they are the only booleans in the class. Everything else is evidence: always
- * populated, never gated, there for your log row.
+ * Three verbs — report, block, deceive — and they are the only decisions in the class. Everything
+ * else is evidence: always populated, never gated, there for your log row.
  *
  * The shape is deliberate. A corpus match is not a decision — `/favicon.ico` matches 24 nuclei
  * templates and `/` matches 1,590, because the corpus carries technology-fingerprint templates
@@ -45,18 +45,26 @@ final class Assessment
     /** @var string closed label set — see reason() */
     private $reason;
 
+    /** @var object|null what to serve instead of the real response; null unless a Judge chose deceive */
+    private $fake;
+
+    /**
+     * @param object|null $fake
+     */
     public function __construct(
         Verdict $verdict,
         string $kind,
         bool $report,
         bool $block,
-        string $reason
+        string $reason,
+        $fake = null
     ) {
         $this->verdict = $verdict;
         $this->kind = $kind;
         $this->report = $report;
         $this->block = $block;
         $this->reason = $reason;
+        $this->fake = $fake;
     }
 
     /** Send this IP to mainnet. */
@@ -65,10 +73,32 @@ final class Assessment
         return $this->report;
     }
 
-    /** Refuse this request. */
+    /** Refuse this request. Never true alongside shouldDeceive(): a block is a tell. */
     public function shouldBlock(): bool
     {
         return $this->block;
+    }
+
+    /**
+     * Serve fake() in place of the real response.
+     *
+     * Only a Judge raises this. The default rules never deceive — under PROFILE_HONEYPOT they
+     * report and leave the decoy to the host — so without a Judge this is always false.
+     */
+    public function shouldDeceive(): bool
+    {
+        return $this->fake !== null;
+    }
+
+    /**
+     * The response to serve when shouldDeceive(). Whatever object the Judge handed over —
+     * funnypot-policy's FakeResponse in practice; the sensor never reads it.
+     *
+     * @return object|null
+     */
+    public function fake()
+    {
+        return $this->fake;
     }
 
     /**
@@ -158,8 +188,11 @@ final class Assessment
     }
 
     /**
-     * Why the two verbs came out the way they did. Closed set:
-     * clean | ambient | own-route | scanner-ua | probe | attack | honeypot-profile | judge
+     * Why the verbs came out the way they did. Closed set under the default rules:
+     * clean | ambient | robots-exempt | scanner-ua | scripting-ua | probe | attack | honeypot-profile
+     *
+     * With a Judge configured it is the Judge's own label ('judge' when it gives none), or
+     * 'no-client-ip' when check() was called without the IP the Judge needs and failed open.
      */
     public function reason(): string
     {
@@ -184,6 +217,7 @@ final class Assessment
             'score' => $this->score(),
             'report' => $this->report,
             'block' => $this->block,
+            'deceive' => $this->shouldDeceive(),
             'reason' => $this->reason,
             'severity' => $this->verdict->severity,
             'anomaly' => $this->verdict->anomaly,
@@ -206,7 +240,7 @@ final class Assessment
             throw new LogicException(
                 'Funnypot: Assessment has no $' . $name . '. A corpus match is not a decision — '
                 . '/favicon.ico matches 24 templates and / matches 1590. '
-                . 'Use shouldReport() or shouldBlock().'
+                . 'Use shouldReport(), shouldBlock() or shouldDeceive().'
             );
         }
 

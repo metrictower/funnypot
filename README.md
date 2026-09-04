@@ -12,8 +12,10 @@
 > - Building on the low-level **decision/policy engine** → [funnypot-policy](https://github.com/metrictower/funnypot-policy)
 
 **Early days.** Published and tagged, but the API is deliberately small and will still move — pin a
-caret range (`^0.4`) rather than tracking a branch. **0.4 rewrote the whole surface** —
+caret range (`^0.5`) rather than tracking a branch. **0.4 rewrote the whole surface** —
 `inspect()`/`reportable()`/`min_severity` are gone; see *What the Assessment will not let you do*.
+**0.5 reshapes the `Judge` seam** — `judge()` takes a `JudgeContext`, `check()` takes the client IP,
+and the `Assessment` can say `shouldDeceive()`; see *Bringing your own Judge*.
 
 The batteries-included entry point: [`funnypot-core`](https://github.com/metrictower/funnypot-core)
 detection wired to [`funnypot-mainnet-client`](https://github.com/metrictower/funnypot-mainnet-client)
@@ -45,8 +47,8 @@ $funnypot = Funnypot::fromArray([
     },
 ]);
 
-// Pure, no I/O — safe inline on the request path.
-$check = $funnypot->check(RequestContext::fromGlobals());
+// No I/O — safe inline on the request path. The default rules ignore the IP; a Judge needs it.
+$check = $funnypot->check(RequestContext::fromGlobals(), $clientIp);
 
 if ($check->shouldReport()) {
     $funnypot->report($clientIp, $check);   // enqueues only, never blocks
@@ -147,7 +149,8 @@ app and the wrong one for Laravel or Symfony: N workers on an ephemeral containe
 fragment the dedup state and the daily counter per worker, and lose both on redeploy.
 
 `Detector` is the judgement with no reporting attached — same `check()`, same `Assessment`, and it
-needs no mainnet key and no queue path because `check()` is pure:
+needs no mainnet key and no queue path because `check()` does no I/O (and, under the default rules,
+keeps no state):
 
 ```php
 use Funnypot\Sensor\Detector;
@@ -187,7 +190,7 @@ reports your own users — measured at 8 of 10 ordinary routes.
 | **log only** | read `$check->toArray()`, ignore both verbs. Good for a trial run |
 | **detect + report** | act on `shouldReport()` |
 | **block (WAF)** | act on `shouldBlock()` |
-| **honeypot / deceive** | `'profile' => PROFILE_HONEYPOT`, serve your own decoy |
+| **honeypot / deceive** | `'profile' => PROFILE_HONEYPOT`, serve your own decoy — or a `Judge` that returns a fake, and act on `shouldDeceive()` |
 
 **Log-only needs no feature and no flag** — it is what you get by not acting on the verbs. That is
 the recommended way to start: run funnypot beside whatever you have, compare the two, and only then
@@ -215,9 +218,41 @@ the *expected* clients — they are the integrations your app exists to serve. T
 path-dependent, not client-dependent: the same UA is unremarkable on an API and odd on a login
 form, and treating it as a property of the client alone is what produces the false positive.
 
+### Bringing your own Judge
+
+`'judge' => $judge` replaces the default rules wholesale with a `Funnypot\Sensor\Judge` — the seam
+`funnypot-policy` plugs into. It is handed the core `Verdict`, the `RequestContext`, and a
+`JudgeContext` carrying the three things neither of those has: `posture()` (`PROFILE_APP` /
+`PROFILE_HONEYPOT`), `ip()`, and `profile()` — core's `SiteProfile`, so `hasRoute($method, $path)`
+answers with *your* `own_routes` oracle rather than an empty one.
+
+```php
+public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+{
+    // ...
+    return ['report' => true, 'block' => false, 'reason' => 'deceive', 'fake' => $fakeResponse];
+}
+```
+
+Three things follow from a Judge being there:
+
+- **Pass the client IP to `check()`.** Core's `RequestContext` is IP-blind by design, so a Judge
+  gets the address only from `check($request, $clientIp)`. Without it the check **fails open** —
+  `report=false`, `block=false`, `reason='no-client-ip'` — and the Judge is not called. It does
+  not fall back to the default rules: those are *stricter* than a policy carrying an allowlist,
+  so that fallback would bypass the operator's own exemptions.
+- **`fake` is the deceive channel.** Return an object (funnypot-policy's `FakeResponse`, or your
+  own) and the host reads it back as `$check->shouldDeceive()` / `$check->fake()` and serves it in
+  place of the real response. A ruling that carries a fake never blocks, whatever it said in
+  `block` — a block is a tell, and deceive exists to avoid one. The default rules never deceive.
+- **`check()` is only as pure as the Judge.** The default rules keep no state; funnypot-policy's
+  Judge reads and writes its store on every ruling. Call `check()` once per request, and use
+  `Detector::checkPure()` — the default rules, Judge or not — anywhere the same request is seen a
+  second time. `MainnetObserver` already does.
+
 ### What is NOT available yet
 
-Everything above is **stateless** — each request is judged on its own. What funnypot cannot yet do
+The default rules are **stateless** — each request is judged on its own. What funnypot cannot yet do
 for a framework-free host is **accumulate across requests**: scores that decay, ban thresholds,
 pins, an operator allowlist. That lives in `funnypot-policy` and needs a `StateStore` the Sensor
 does not yet ship (FP-0101). Until then, "funnypot as a WAF" means per-request blocking, not
@@ -284,10 +319,12 @@ $engine   = \Funnypot\Core\Honeypot::default(null, $observer);
 ```
 
 Core calls an Observer only on the `respond()` path, so detect-only integrations should stay with
-`check()` / `report()` at their own call site. The observer re-runs `check()` rather than reporting
-on the `Detection` core hands it: a Detection carries no classification, so reporting on one means
-reporting on a bare corpus match. The re-check costs a few microseconds and keeps both paths on one
-dialect.
+`check()` / `report()` at their own call site. The observer re-runs the **default rules**
+(`Detector::checkPure()`) rather than reporting on the `Detection` core hands it: a Detection
+carries no classification, so reporting on one means reporting on a bare corpus match. The
+re-check costs a few microseconds. It deliberately never re-runs a configured `Judge` — this hook
+fires after your own `check()` for the same request, and a stateful Judge run twice scores the
+actor twice.
 
 ## Namespace
 

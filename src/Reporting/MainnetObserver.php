@@ -41,9 +41,13 @@ final class MainnetObserver implements Observer
      * Re-checks rather than reporting on the Detection core hands over.
      *
      * A Detection carries no classification, so reporting on it means reporting on a bare corpus
-     * match — the mistake this package exists to prevent. check() costs a few microseconds (the
-     * route lookup is a handful of O(1) hash probes) and gives this path the identical judgement
-     * an embedder gets at their own call site. One dialect, not two.
+     * match — the mistake this package exists to prevent. The re-check costs a few microseconds
+     * (the route lookup is a handful of O(1) hash probes).
+     *
+     * It is the PURE re-check, never the configured Judge. This hook fires on core's respond()
+     * path, after the host has already run check() for the request in flight; a stateful Judge
+     * run again here would advance the actor's score twice for one request. So the Judge rules
+     * once, at the host's call site, and this path reports on the default rules.
      *
      * Core drops the Verdict at this seam; widening Observer to carry it removes the re-check.
      */
@@ -55,7 +59,7 @@ final class MainnetObserver implements Observer
             return;
         }
 
-        $this->funnypot->report($ip, $this->funnypot->check($r));
+        $this->funnypot->report($ip, $this->funnypot->detector()->checkPure($r));
     }
 
     /**

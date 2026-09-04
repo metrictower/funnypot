@@ -9,9 +9,13 @@ use Funnypot\Core\RequestContext;
 use Funnypot\Core\Verdict;
 use Funnypot\Sensor\Assessment;
 use Funnypot\Sensor\Funnypot;
+use Funnypot\Sensor\Judge;
+use Funnypot\Sensor\JudgeContext;
+use Funnypot\Sensor\Reporting\MainnetObserver;
 use InvalidArgumentException;
 use LogicException;
 use PHPUnit\Framework\TestCase;
+use stdClass;
 use TypeError;
 
 final class FunnypotTest extends TestCase
@@ -247,7 +251,7 @@ final class FunnypotTest extends TestCase
         $check = Funnypot::fromArray($this->config())->check($this->request('/'));
 
         $this->expectException(LogicException::class);
-        $this->expectExceptionMessageMatches('/Use shouldReport\(\) or shouldBlock\(\)/');
+        $this->expectExceptionMessageMatches('/Use shouldReport\(\), shouldBlock\(\) or shouldDeceive\(\)/');
 
         /** @noinspection PhpUndefinedFieldInspection */
         $check->matched;
@@ -293,15 +297,15 @@ final class FunnypotTest extends TestCase
     public function test_a_custom_judge_overrides_the_default_rules(): void
     {
         $funnypot = Funnypot::fromArray($this->config(array(
-            'judge' => new class implements \Funnypot\Sensor\Judge {
-                public function judge(Verdict $verdict, RequestContext $request, string $profile): array
+            'judge' => new class implements Judge {
+                public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
                 {
                     return array('report' => false, 'block' => true, 'reason' => 'mine');
                 }
             },
         )));
 
-        $check = $funnypot->check($this->request('/.env'));
+        $check = $funnypot->check($this->request('/.env'), '198.51.100.1');
 
         self::assertFalse($check->shouldReport());
         self::assertTrue($check->shouldBlock());
@@ -356,8 +360,8 @@ final class FunnypotTest extends TestCase
 
         $plain = Funnypot::fromArray($this->config());
         $judged = Funnypot::fromArray($this->config(array(
-            'judge' => new class implements \Funnypot\Sensor\Judge {
-                public function judge(Verdict $verdict, RequestContext $request, string $profile): array
+            'judge' => new class implements Judge {
+                public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
                 {
                     // A policy-shaped reason: never 'scanner-ua'.
                     return array('report' => true, 'block' => false, 'reason' => 'malicious-ua');
@@ -368,13 +372,161 @@ final class FunnypotTest extends TestCase
         foreach (array('/robots.txt', '/favicon.ico', '/.env', '/') as $path) {
             self::assertSame(
                 $plain->check($this->request($path, $scannerUa))->score(),
-                $judged->check($this->request($path, $scannerUa))->score(),
+                $judged->check($this->request($path, $scannerUa), '198.51.100.1')->score(),
                 $path . ' must score the same with or without a judge'
             );
         }
 
         // and the scanner-UA case specifically is the graded one, not the soft one
-        self::assertSame(10, $judged->check($this->request('/robots.txt', $scannerUa))->score());
+        self::assertSame(10, $judged->check($this->request('/robots.txt', $scannerUa), '198.51.100.1')->score());
+    }
+
+    // ── the Judge seam: what it is handed, and what it can hand back ──
+
+    /** A Judge that records what check() hands it and rules nothing. */
+    private function recordingJudge(): Judge
+    {
+        return new class implements Judge {
+            /** @var JudgeContext|null */
+            public $seen;
+
+            /** @var int */
+            public $calls = 0;
+
+            public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+            {
+                $this->seen = $context;
+                $this->calls++;
+
+                return array('report' => false, 'block' => false, 'reason' => 'recorded');
+            }
+        };
+    }
+
+    /**
+     * Policy needs the client IP (core's RequestContext is IP-blind) and the host's route oracle
+     * (without it routeExists() is false for every path and the route checks misfire). Both ride
+     * on the context, alongside the posture.
+     */
+    public function test_a_judge_is_handed_the_posture_the_client_ip_and_the_hosts_route_oracle(): void
+    {
+        $judge = $this->recordingJudge();
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'own_routes' => static function ($method, $path) {
+                return $path === '/login';
+            },
+            'judge' => $judge,
+        )));
+
+        $funnypot->check($this->request('/login'), '198.51.100.1');
+
+        $context = $judge->seen;
+        self::assertInstanceOf(JudgeContext::class, $context);
+        self::assertSame(Funnypot::PROFILE_APP, $context->posture());
+        self::assertSame('198.51.100.1', $context->ip());
+        self::assertTrue($context->profile()->hasRoute('GET', '/login'), 'the profile is the host\'s own, not an empty one');
+        self::assertFalse($context->profile()->hasRoute('GET', '/.env'));
+
+        $pot = $this->recordingJudge();
+        Funnypot::fromArray($this->config(array('profile' => Funnypot::PROFILE_HONEYPOT, 'judge' => $pot)))
+            ->check($this->request('/login'), '198.51.100.1');
+        self::assertSame(Funnypot::PROFILE_HONEYPOT, $pot->seen->posture());
+    }
+
+    /**
+     * deceive is policy's default-install action, and it carries a body the host must serve.
+     * Mapping it onto block would be wrong — a block is a tell — so a ruling with a fake never
+     * blocks, whatever it said in 'block'.
+     */
+    public function test_a_judge_can_deceive_and_a_deceiving_ruling_never_blocks(): void
+    {
+        $fake = new stdClass();
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'judge' => new class($fake) implements Judge {
+                /** @var object */
+                private $fake;
+
+                public function __construct($fake)
+                {
+                    $this->fake = $fake;
+                }
+
+                public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+                {
+                    return array('report' => true, 'block' => true, 'reason' => 'deceive', 'fake' => $this->fake);
+                }
+            },
+        )));
+
+        $check = $funnypot->check($this->request('/.env'), '198.51.100.1');
+
+        self::assertTrue($check->shouldDeceive());
+        self::assertSame($fake, $check->fake(), 'the host serves exactly what the Judge handed over');
+        self::assertFalse($check->shouldBlock(), 'a block alongside a fake is a tell; the fake wins');
+        self::assertTrue($check->shouldReport(), 'deceiving does not stop reporting');
+        self::assertSame('deceive', $check->reason());
+        self::assertTrue($check->toArray()['deceive']);
+    }
+
+    public function test_a_fake_that_is_not_an_object_is_no_fake(): void
+    {
+        $funnypot = Funnypot::fromArray($this->config(array(
+            'judge' => new class implements Judge {
+                public function judge(Verdict $verdict, RequestContext $request, JudgeContext $context): array
+                {
+                    return array('report' => false, 'block' => true, 'reason' => 'block', 'fake' => 'not a response');
+                }
+            },
+        )));
+
+        $check = $funnypot->check($this->request('/.env'), '198.51.100.1');
+
+        self::assertFalse($check->shouldDeceive());
+        self::assertNull($check->fake());
+        self::assertTrue($check->shouldBlock(), 'with nothing to serve, the block stands');
+    }
+
+    /**
+     * A Judge cannot rule without the client IP, and the default rules are the WRONG fallback:
+     * they are stricter than the Judge and bypass whatever allowlist the host's policy carries.
+     * So the request fails open, and the Judge is not consulted at all.
+     */
+    public function test_a_judge_backed_check_fails_open_without_a_client_ip(): void
+    {
+        $judge = $this->recordingJudge();
+        $funnypot = Funnypot::fromArray($this->config(array('judge' => $judge)));
+
+        // /.env is exactly what the default rules would report AND block.
+        $check = $funnypot->check($this->request('/.env'));
+
+        self::assertSame('no-client-ip', $check->reason());
+        self::assertFalse($check->shouldReport());
+        self::assertFalse($check->shouldBlock());
+        self::assertFalse($check->shouldDeceive());
+        self::assertSame(0, $judge->calls, 'the Judge is never called with no IP to rule on');
+
+        // Evidence is unaffected: the log row still says what the request was.
+        self::assertSame(Verdict::SCANNER_PROBE, $check->kind());
+    }
+
+    /**
+     * The observer fires on core's respond() path, after the host has already run check() for
+     * the same request. Re-running a stateful Judge there would score the actor twice, so the
+     * observer reports on the default rules and leaves the Judge to the host's call site.
+     */
+    public function test_the_observer_reports_on_the_default_rules_and_never_re_runs_the_judge(): void
+    {
+        // This Judge rules report=false, so a queued report proves the default rules ran instead.
+        $judge = $this->recordingJudge();
+        $funnypot = Funnypot::fromArray($this->config(array('judge' => $judge)));
+        $observer = new MainnetObserver($funnypot, static function () {
+            return '198.51.100.1';
+        });
+
+        $observer->onDetection($this->request('/.env'), Detection::none());
+
+        self::assertSame(0, $judge->calls);
+        self::assertSame(1, $funnypot->queuedCount(), 'the default rules still report the probe');
     }
 
 

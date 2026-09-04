@@ -21,7 +21,9 @@ use InvalidArgumentException;
  * the daily counter per worker and lose both on redeploy. Such a host wants check() here and its
  * own job for delivery.
  *
- * check() is pure — no I/O, no state — so this needs no mainnet key and no queue path.
+ * check() under the default rules is pure — no I/O, no state — so this needs no mainnet key and
+ * no queue path. A configured Judge need not be: funnypot-policy's reads and writes its store on
+ * every ruling. checkPure() is the form that never consults the Judge.
  *
  * 7.3-clean: classic constructor, docblocked untyped properties, no promotion/match/enums.
  */
@@ -191,31 +193,61 @@ final class Detector
     }
 
     /**
-     * Classify a request and decide what to do about it. Pure, no I/O, safe inline.
+     * Classify a request and decide what to do about it. Safe inline: no I/O of its own, and pure
+     * under the default rules. A configured Judge runs inside this call, so whatever state it
+     * keeps advances here — call it once per request.
+     *
+     * $ip is the client address the Judge rules on; core's RequestContext is IP-blind by design.
+     * Without one a Judge cannot rule, so the request FAILS OPEN — report=false, block=false,
+     * reason 'no-client-ip' — rather than falling back to the default rules. That fallback would
+     * be stricter than the Judge and bypass whatever allowlist the host's policy carries. The
+     * default rules need no IP and ignore it.
      *
      * Uses classify(), NOT detect(). detect() projects the Verdict down to its Detection and
      * throws the classification away, so core would conclude CLEAN while the Detection still
      * read matched=true at critical severity.
      */
-    public function check(RequestContext $r): Assessment
+    public function check(RequestContext $r, string $ip = ''): Assessment
     {
         $verdict = $this->engine->classify($r, $this->profile);
         $path = self::stripQuery($r->path);
         $kind = $this->kindOf($verdict, $path);
 
-        if ($this->judge !== null) {
-            $ruling = $this->judge->judge($verdict, $r, $this->posture);
-
-            return new Assessment(
-                $verdict,
-                $kind,
-                (bool) $ruling['report'],
-                (bool) $ruling['block'],
-                isset($ruling['reason']) ? (string) $ruling['reason'] : 'judge'
-            );
+        if ($this->judge === null) {
+            return $this->rule($verdict, $kind, $path);
         }
 
-        return $this->rule($verdict, $kind, $path);
+        if ($ip === '') {
+            return new Assessment($verdict, $kind, false, false, 'no-client-ip');
+        }
+
+        $ruling = $this->judge->judge($verdict, $r, new JudgeContext($this->posture, $ip, $this->profile));
+        $fake = isset($ruling['fake']) && is_object($ruling['fake']) ? $ruling['fake'] : null;
+
+        return new Assessment(
+            $verdict,
+            $kind,
+            !empty($ruling['report']),
+            // A ruling that deceives never blocks: blocking is a tell, and deceive exists to avoid it.
+            $fake === null && !empty($ruling['block']),
+            isset($ruling['reason']) ? (string) $ruling['reason'] : 'judge',
+            $fake
+        );
+    }
+
+    /**
+     * check() under the default rules, whether or not a Judge is configured. Always pure.
+     *
+     * For call sites that see a request the host has already judged. MainnetObserver runs on
+     * core's respond() path, after the host's own check(); a stateful Judge run again there would
+     * advance the actor's score twice for one request.
+     */
+    public function checkPure(RequestContext $r): Assessment
+    {
+        $verdict = $this->engine->classify($r, $this->profile);
+        $path = self::stripQuery($r->path);
+
+        return $this->rule($verdict, $this->kindOf($verdict, $path), $path);
     }
 
     public function engine(): Honeypot

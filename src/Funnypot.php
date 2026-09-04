@@ -18,13 +18,14 @@ use InvalidArgumentException;
  *
  * The whole integration is two questions:
  *
- *     $check = $funnypot->check($request);
+ *     $check = $funnypot->check($request, $clientIp);
  *     if ($check->shouldReport()) { $funnypot->report($clientIp, $check); }
  *     if ($check->shouldBlock())  { http_response_code(403); exit; }
  *
- * check() is pure and cheap, so it is safe inline. report() only ever ENQUEUES; delivery happens
- * in drain(), which the host calls out of band (cron, scheduler, worker). There is no genuinely
- * async HTTP in stock PHP without an event loop, so the queue is the seam.
+ * check() does no I/O and is pure under the default rules, so it is safe inline; a configured
+ * Judge runs inside it and may keep state of its own. report() only ever ENQUEUES; delivery
+ * happens in drain(), which the host calls out of band (cron, scheduler, worker). There is no
+ * genuinely async HTTP in stock PHP without an event loop, so the queue is the seam.
  *
  * There is no severity floor and no anomaly threshold, because neither works. Severity is
  * ANTI-correlated with benignness at the top of the traffic distribution — the corpus piles its
@@ -59,7 +60,7 @@ final class Funnypot
     /** @var Reporter owned directly so drain() is reachable — Client exposes no drain of its own */
     private $reporter;
 
-    /** @var Detector the judgement half; pure, and usable on its own */
+    /** @var Detector the judgement half; usable on its own */
     private $detector;
 
     public function __construct(
@@ -138,11 +139,14 @@ final class Funnypot
     }
 
     /**
-     * Classify a request and decide what to do about it. Pure, no I/O, safe inline.
+     * Classify a request and decide what to do about it. Safe inline; no I/O.
+     *
+     * Pass the client IP: the default rules ignore it, but a Judge cannot rule without one and a
+     * Judge-backed check fails open ('no-client-ip') when it is missing. See Detector::check().
      */
-    public function check(RequestContext $r): Assessment
+    public function check(RequestContext $r, string $ip = ''): Assessment
     {
-        return $this->detector->check($r);
+        return $this->detector->check($r, $ip);
     }
 
     /**
