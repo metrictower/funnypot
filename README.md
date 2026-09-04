@@ -16,7 +16,9 @@ caret range (`^0.5`) rather than tracking a branch. **0.4 rewrote the whole surf
 `inspect()`/`reportable()`/`min_severity` are gone; see *What the Assessment will not let you do*.
 **0.5 reshapes the `Judge` seam** — `judge()` takes a `JudgeContext`, `check()` takes the client IP,
 the `Assessment` can say `shouldDeceive()`, and the ambient and honeypot guarantees now hold under a
-Judge; see *Bringing your own Judge*.
+Judge; see *Bringing your own Judge*. **`RouteOracle::bareSegments()` is now the oracle for a 404
+handler** — `ONLY_ON_404` still works, and still bans your own users on a framework app; see
+*Declare your routes*.
 
 The batteries-included entry point: [`funnypot-core`](https://github.com/metrictower/funnypot-core)
 detection wired to [`funnypot-mainnet-client`](https://github.com/metrictower/funnypot-mainnet-client)
@@ -78,12 +80,67 @@ that is what scanners go looking for — so core cannot know yours are genuine u
 Measured before it was required: a real Chrome browser was reportable on **8 of 10** ordinary
 application routes, `/login` and `/index.php` among them at `critical`.
 
-If you mount `check()` inside your 404 / NotFound handler, your framework has already ruled that
-nothing reaching it is a real route. Say so explicitly:
+*From a 404 handler, hand it your routes — do not tell it there are none.* The framework has
+ruled that nothing reaching a 404 handler *resolves*; that is not the same as nothing reaching it
+being *yours*. A route group's bare prefix has no route of its own — `Route::group(['prefix' =>
+'security'])` registers `security/foo` and `security/bar`, never `security` — so a stale bookmark
+to `/security` 404s, reaches the sensor, and matches a corpus that carries `/security`, `/api`,
+`/admin` and `/login` precisely because real apps have them. Measured on a Laravel host that
+followed the old `ONLY_ON_404` advice: all seven of its group prefixes (`/security`, `/api`,
+`/admin`, `/login`, `/dashboard`, `/settings`, `/logout`) classified `scanner-probe` — report *and*
+block — from a full-header Chrome, and one of them banned a colleague.
 
 ```php
-'own_routes' => Funnypot::ONLY_ON_404,
+use Funnypot\Sensor\RouteOracle;
+
+'own_routes' => RouteOracle::bareSegments(static function () {
+    foreach (app('router')->getRoutes() as $route) {   // Laravel; any router that can list its URIs will do
+        yield $route->uri();
+    }
+}),
 ```
+
+`bareSegments()` takes the route URI patterns as the router lists them (`security/audit`,
+`api/v1/users/{id}`, `/`) — an array, a `Traversable`, or a callable returning one — and answers
+`own_routes` like this:
+
+| path | owned | why |
+|---|---|---|
+| `/` | yes | the app's own front door is not a probe |
+| `/security`, `/security/`, `/Security` | yes | the exact bare first segment of a registered route; a trailing slash or a capital is not a different path to a human |
+| `/security/nope`, `/admin/config.php` | **no** | deeper than the prefix is nothing you publish — the corpus must still see it |
+| `/wp-login.php` | no | not a segment of yours |
+
+Three things about it are deliberate:
+
+- **Read the runtime router, never `routes/*.php`.** A static parse cannot see group prefixes:
+  `Route::get('ping')` inside a group prefixed `api` is `/api/ping`, and a parsed list grants
+  ownership of a `/ping` the app does not publish. Measured: 112 parsed segments against the
+  router's 83, and the difference is in the dangerous direction. A callable is enumerated once,
+  lazily, on the first check that needs it, because a framework's router is still empty while its
+  config is being read; an empty table is never cached, so a check that arrives before the routes
+  register does not decide every later one.
+- **A parameter-first route (`{path}`) contributes nothing.** Its segment would own every path
+  and switch the sensor off — an oracle hardcoded to `true`.
+- **Bare segment, not subtree — do not widen it.** Measured over the 5,196-key corpus against
+  that host's 83 runtime segments, counting detections `ONLY_ON_404` reports that stop being
+  reported:
+
+  | ownership rule | detections forfeited |
+  |---|---|
+  | whole subtree under an owned prefix | **441 / 5,182 (8.51%)** — `/api` 294, `/admin` 58, `/login` 26 |
+  | exact bare segment only | **20 / 5,182 (0.39%)** — every one a route group of the host |
+
+  Subtree ownership hands a scanner the whole of `/admin/*`. The temptation to "simplify" to a
+  prefix match is real, and it costs 8.5% of detection silently.
+
+What it does not cover: a route that resolves and then `abort(404)`s is not a bare prefix, so it
+is inspected like any other 404. Asking the router for a full match would close that, but a
+match binds the route to the request — a side effect inside a 404 handler — so it is left open.
+
+`Funnypot::ONLY_ON_404` still exists, for a host with no path the corpus could mistake for a
+probe — no route groups, no pretty prefixes. It maps to "no route anywhere", and a framework app
+cannot honestly say that from its 404 handler.
 
 **A corpus match is not a scanner, and neither severity nor anomaly separates them.** The corpus
 carries technology-fingerprint templates next to exploit ones, so ordinary unprompted browser
@@ -128,7 +185,7 @@ line hands you the exact id.
 
 ```php
 $detector = Detector::fromArray([
-    'own_routes'       => Funnypot::ONLY_ON_404,
+    'own_routes'       => RouteOracle::bareSegments($routeUris),
     'ignore_templates' => ['laravel-telescope', 'miscellaneous'],   // template ids AND tags
 ]);
 ```
@@ -155,8 +212,9 @@ keeps no state):
 
 ```php
 use Funnypot\Sensor\Detector;
+use Funnypot\Sensor\RouteOracle;
 
-$detector = Detector::fromArray(['own_routes' => Funnypot::ONLY_ON_404]);
+$detector = Detector::fromArray(['own_routes' => RouteOracle::bareSegments($routeUris)]);
 
 $check = $detector->check($request);
 if ($check->shouldReport()) {
@@ -174,13 +232,15 @@ Two independent choices: **where** it runs, and **what you do** with the answer.
 
 | mount | config | sees |
 |---|---|---|
-| **404 / NotFound handler** | `'own_routes' => Funnypot::ONLY_ON_404` | only unmatched requests |
+| **404 / NotFound handler** | `'own_routes' => RouteOracle::bareSegments($routeUris)` | only unmatched requests |
 | **pre-request middleware** | `'own_routes' => fn($m, $p) => $router->has($m, $p)` | all traffic, before routing |
 
 The mount point is expressed *through the route oracle*, and that is why `own_routes` is required.
-In a 404 handler the framework has already ruled nothing reaching you is real, so `ONLY_ON_404` is
-a true statement. As middleware you see your own `/login`, and without a real oracle funnypot
-reports your own users — measured at 8 of 10 ordinary routes.
+In a 404 handler the framework has already ruled nothing reaching you resolves — but a bare
+route-group prefix does not resolve either, and the corpus rates it a probe, so the oracle there
+is `bareSegments()`, not `ONLY_ON_404` (see *Declare your routes*). As middleware you see your own
+`/login`, and without a real oracle funnypot reports your own users — measured at 8 of 10 ordinary
+routes.
 
 ### What — the posture
 

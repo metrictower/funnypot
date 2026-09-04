@@ -49,8 +49,12 @@ final class Funnypot
     public const PROFILE_HONEYPOT = 'honeypot';
 
     /**
-     * own_routes value for the documented mount point: check() runs inside the 404 / NotFound
-     * handler, so the framework has already ruled that nothing here is a real route.
+     * own_routes value saying "nothing reaching check() is a real route". True only for a host
+     * with no path the corpus could mistake for a probe — and a framework app is not one, even
+     * from its 404 handler: a route group's bare prefix (/security, /api, /admin, /login) has no
+     * route of its own, so it 404s, reaches the sensor, and scores as a scanner probe. On that
+     * mount this shortcut reports and blocks a real visitor on a stale bookmark; measured, and
+     * it happened. A 404 handler wants RouteOracle::bareSegments() instead.
      */
     public const ONLY_ON_404 = 'only-on-404';
 

@@ -119,6 +119,11 @@ final class Detector
      *
      * Under PROFILE_HONEYPOT the question does not arise: nothing on the host is real.
      *
+     * ONLY_ON_404 maps to "no route anywhere", which a framework app's 404 handler cannot
+     * honestly claim — a route group's bare prefix 404s too, and the corpus rates it a probe.
+     * RouteOracle::bareSegments() is the oracle for that mount; the shortcut stays for a host
+     * with no such prefix.
+     *
      * @param array<string,mixed> $config
      */
     public static function buildSiteProfile(array $config, string $posture): SiteProfile
@@ -136,8 +141,10 @@ final class Detector
             throw new InvalidArgumentException(
                 'funnypot: "own_routes" is required — a callable fn(string $method, string $path): bool '
                 . 'saying whether a path is a REAL route on this site. Without it your own /login and '
-                . '/admin look exactly like scanner probes and your real visitors get reported. '
-                . 'Pass Funnypot::ONLY_ON_404 if you only call check() from your 404 handler.'
+                . '/admin look exactly like scanner probes and your real visitors get reported. From '
+                . 'a 404 handler pass RouteOracle::bareSegments($routeUris): a route group\'s bare '
+                . 'prefix (/security, /api) 404s too, and the corpus rates it a probe. '
+                . 'Funnypot::ONLY_ON_404 is only for a host with no such prefix.'
             );
         }
 
@@ -147,7 +154,8 @@ final class Detector
 
         if (!is_callable($config['own_routes'])) {
             throw new InvalidArgumentException(
-                'funnypot: "own_routes" must be a callable fn($method, $path): bool, or '
+                'funnypot: "own_routes" must be a callable fn($method, $path): bool — '
+                . 'RouteOracle::bareSegments($routeUris) from a 404 handler — or '
                 . 'Funnypot::ONLY_ON_404.'
             );
         }
